@@ -1,0 +1,29 @@
+# =============================================================================
+# Sonificació Oceànica - Python Dependencies
+# =============================================================================
+# Install with: pip install -r requirements.txt
+# Requires Python 3.11+
+# =============================================================================
+
+# Core acoustic processing
+echopype==0.11.0
+
+# Scientific computing
+numpy==2.3.4
+pandas==2.3.3
+scipy==1.16.3
+xarray==2025.10.1
+
+# Visualization
+matplotlib==3.10.7
+
+# Data formats
+h5netcdf==1.7.3
+netCDF4==1.7.3
+h5py==3.15.1
+
+# Parallel processing
+dask==2025.10.0
+
+# Geospatial
+geopy==2.4.1
