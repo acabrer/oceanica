@@ -2,7 +2,7 @@
 
 **Transformar dades acústiques de l'oceà en música.**
 
-Projecte creatiu de sonificació que utilitza dades hidroacústiques de l'expedició MALASPINA per crear composicions musicals que representen la migració vertical diària de la vida marina.
+Projecte creatiu de sonificació que utilitza dades hidroacústiques per crear composicions electroacústiques que representen la migració vertical diària de la vida marina.
 
 **Equip:** Oceànica (Alex Cabrer & Joan Sala)
 **Subvenció:** CLT019 - Generalitat de Catalunya, Departament de Cultura
