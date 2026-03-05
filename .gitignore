@@ -61,6 +61,9 @@ output/
 # Logs
 *.log
 
+# Analysis scripts (one-off)
+analysis_v6_comprehensive.py
+
 # Temporary files
 *.tmp
 *.temp
