@@ -72,3 +72,6 @@ untitled folder/
 
 # Archive folder (old development files)
 archive/
+
+# Plans and internal docs (not for distribution)
+plans/

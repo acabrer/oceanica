@@ -14,13 +14,18 @@ scatterers between the surface feeding zone and the deep refuge.
 Everything you hear corresponds directly to a measurement from the water column.
 
 MAPPING:
-  dvm_depth -> pitch (80-500 Hz, ~2.6 octaves: E2 to B4)
-  entropy   -> FM timbre (pure sine <-> complex inharmonic)
-  velocity  -> brightness (ascending = brighter, descending = darker)
-  anomaly   -> detuning (beating/tension when depth deviates from expected)
-  intensity -> amplitude (recedes when acoustic energy is low)
+  dvm_depth      -> pitch (45-650 Hz, ~3.8 octaves: F#1 to E5, non-linear)
+  entropy        -> FM timbre (pure sine <-> complex inharmonic)
+  velocity       -> brightness (ascending = brighter, descending = darker)
+  anomaly        -> detuning (beating/tension when depth deviates from expected)
+  intensity      -> amplitude + phrase gate (recedes/silences when energy is low)
+  onset          -> timbral transient (FM index spike + amplitude swell + re-attack)
+  ipc            -> granularity + phrase gate (turbulent = shimmer, stable = rest)
+  histogram_diff -> micro-pitch (subtle ±4 Hz inflections from zone energy shifts)
+  histogram[8]   -> spectral partials (detuned pairs, spectral width ~ zone energy)
+  phraseGate     -> articulation (carrier voice breathes; sub-harmonic persists)
 
-DATA: sonification_sc_v7_20110126.json
+DATA: sonification_sc_v8_20110126.json
       MALASPINA 2010, Leg 2, 38 kHz, South Atlantic (~25 S)
       January 26, 2011 — sunrise 05:45 UTC, sunset 20:15 UTC
 
@@ -73,7 +78,7 @@ s.waitForBoot({
 (
 var jsonFile, jsonString;
 
-jsonFile   = File(~dataPath ++ "sonification_sc_v7_" ++ ~dateStr ++ ".json", "r");
+jsonFile   = File(~dataPath ++ "sonification_sc_v8_" ++ ~dateStr ++ ".json", "r");
 jsonString = jsonFile.readAllString;
 jsonFile.close;
 ~jsonData  = jsonString.parseJSON;
@@ -102,20 +107,43 @@ jsonFile.close;
 // --- Onset strength (smoothed transient events, [0,1]) ---
 ~onset = ~jsonData["38kHz"]["onset_strength_norm"].asArray.collect(_.asFloat);
 
+// --- Inter-ping correlation (texture continuity, [0,1]; 0=turbulent, 1=stable) ---
+~ipc = ~jsonData["38kHz"]["inter_ping_correlation"].asArray.collect(_.asFloat);
+
+// --- Histogram short-term differential (0.5=stable, >0.5=gaining, <0.5=losing) ---
+~histDiffShort = Array.fill(8, { |b|
+    ~jsonData["38kHz"]["histogram_diff_short_" ++ b.asString].asArray.collect(_.asFloat);
+});
+
+// --- Auto-detected timing from extractor (hours UTC) ---
+~sunriseH   = ~jsonData["info"]["sunrise_h"].asFloat   ? 5.75;
+~sunsetH    = ~jsonData["info"]["sunset_h"].asFloat    ? 20.25;
+~dawnEndH   = ~jsonData["info"]["dawn_end_h"].asFloat  ? 8.5;
+~duskStartH = ~jsonData["info"]["dusk_start_h"].asFloat ? 19.5;
+// Convert to hour fractions [0,1] for comparison with hourFrac/hourVal
+~sunriseFrac   = ~sunriseH / 24;
+~sunsetFrac    = ~sunsetH / 24;
+~dawnEndFrac   = ~dawnEndH / 24;
+~duskStartFrac = ~duskStartH / 24;
+
 // --- Playback timing ---
 ~speed          = 1.0;
 ~totalDuration  = 480.0;   // 8 minutes at 1x
 ~compression    = ~times.last / ~totalDuration;
 ~masterVol      = 0.75;
 
-// --- Pre-compute depth trace for visualization (500 points, bin-averaged) ---
+// --- Visualization arrays (500 columns) ---
+// Real-time trail: filled during playback from heardDepthSmoothed.
+// Guarantees the line matches the dot exactly (same data, same pipeline).
+// Raw depth preview: pre-computed from dvm_depth_m for unplayed future portion.
 ~vizN = 500;
-~vizDepthTrace = Array.fill(~vizN, { |i|
-    var idxLo = ((i / ~vizN) * (~depthRaw.size - 1)).round.asInteger.max(0);
-    var idxHi = (((i + 1) / ~vizN) * (~depthRaw.size - 1)).round.asInteger.min(~depthRaw.size - 1);
-    var slice = ~depthRaw.copyRange(idxLo, idxHi);
-    slice = slice.reject({ |v| v.isNil or: { v.isNaN } });
-    if(slice.size > 0) { slice.mean } { 400 };
+~vizHeardTrail = Array.fill(~vizN, { nil });  // nil = not yet played
+~vizLastIdx = 0;  // last column written by composition engine
+
+// Raw depth preview: direct from dvm_depth_m (dim line showing unplayed data)
+~vizRawPreview = Array.fill(~vizN, { |i|
+    var idx = ((i / ~vizN) * (~depthRaw.size - 1)).round.asInteger.clip(0, ~depthRaw.size - 1);
+    ~depthRaw[idx] ? 400;
 });
 
 // Pre-compute hour fraction per viz column (for section coloring)
@@ -127,14 +155,18 @@ jsonFile.close;
 // --- Shared GUI state ---
 ~currentTime = 0.0;
 ~depthRawVal = 400.0;
+~heardDepthM = 400.0;   // windowed depth value driving the audio (matches pitch)
+~phraseActive = false;   // whether the phrase gate is open
+~phraseAlpha = 1.0;      // smoothed phrase gate for visual fade (0.0-1.0)
 ~playing     = false;
 
 "".postln;
-"=== MIGRATION ARC DATA LOADED ===".postln;
+"=== MIGRATION ARC DATA LOADED (v8) ===".postln;
 ("Points: " ++ ~times.size).postln;
 ("Duration: " ++ ~times.last.round(1) ++ "s (" ++ (~times.last / 3600).round(0.1) ++ "h)").postln;
 ("Compression: " ++ ~compression.round(1) ++ "x -> " ++ ~totalDuration ++ "s").postln;
-"Features loaded: dvm_depth, entropy, velocity, anomaly, intensity, hour, histogram[8], onset".postln;
+("Sections: sunrise=" ++ ~sunriseH.round(0.1) ++ "h, dawn_end=" ++ ~dawnEndH.round(0.1) ++ "h, dusk_start=" ++ ~duskStartH.round(0.1) ++ "h, sunset=" ++ ~sunsetH.round(0.1) ++ "h").postln;
+"Features loaded: dvm_depth, entropy, velocity, anomaly, intensity, hour, histogram[8], onset, ipc, histDiff[8]".postln;
 )
 
 
@@ -155,26 +187,76 @@ jsonFile.close;
 // Transitions: velocity-driven vibrato and brightness.
 //   Dawn descent: slow darkening. Dusk ascent: sudden clarification.
 //
-// The sub-harmonic reinforces the fundamental when deep — you feel
-// the ocean's weight. The anomaly beating creates interference when
-// depth deviates from expected — biological tension made audible.
+// v2 additions (day-section animation, wider pitch, richer spectrum):
+//   - Onset transients spike FM index (timbral flash, not just volume)
+//   - IPC granularity: turbulent water column → amplitude shimmer (8-14 Hz)
+//   - Micro-pitch: histogram differential → ±4 Hz inflections in static phases
+//   - Histogram partials: boosted (0.22), detuned pairs for spectral width
+//   - Sub-harmonic: extended threshold (300 Hz), stronger (0.3)
+//   - Pitch range: 45-650 Hz (non-linear mapping, ~3.8 octaves)
+//   - Dynamic range: wider floor (0.15 from 0.35)
+//
+// v3 additions (articulation, GUI sync):
+//   - Phrase gating: carrier breathes (on/off from intensity+IPC+onset)
+//   - Sub-harmonic bypasses gate (persists as depth anchor during rests)
+//   - Reverb increases during rests (dissolve-into-space effect)
+//   - Hysteresis on phrase gate (2s min ON, 1s min OFF, no flicker)
+//
+// v4 fixes (data-driven thresholds, display clarity):
+//   - Phrase gate: data-driven thresholds (intensity>0.78, ipc<0.5, onset>0.15)
+//     Old thresholds (0.3/0.7/0.3) never triggered rest — 100% always ON
+//   - "Heard" vs "Data" display: Heard = smoothed depth matching audio pitch,
+//     Data = raw DVM depth from the dual-zone log-ratio algorithm.
+//
+// v5 fixes (click artifact, metronomic gate, IPC split):
+//   - Phrase envelope: 0.08s→0.4s attack, 1.8s→2.5s release (eliminates click)
+//   - IPC split: raw feeds synth texture (ring-mod), windowed feeds gate decision
+//     Raw IPC is bimodal (0.99 or 0.0) — single noisy pings retriggered gate
+//   - Hysteresis: 2s/1s → 5s/3s hold times (organic phrases, not metronomic pulse)
+//
+// v6 fixes (visual-audio coherence, click refinement):
+//   - Unified line+dot: both use heard-depth pipeline (norm→pitch→meters→smoother)
+//     Eliminates confusing divergence between line (raw meters) and dot (heard depth)
+//   - Reverb mix smoothed (Lag.kr 0.5s) to prevent click on ±20% wet jump
+//   - Phrase envelope attack: 0.4s→0.6s for cleaner FM re-entry
+//   - Dot alpha smoothed (tau 0.5s) — no visual pop on gate transitions
+//
+// v7 fixes (trail sync, dawn descent voice):
+//   - Real-time trail: line is written from heardDepthSmoothed during playback
+//     (pre-computed trace diverged due to different windowing; now line ≡ dot)
+//   - Raw depth preview: dim line from dvm_depth_m shows unplayed future data
+//   - Velocity phrase gate: |velocity_norm - 0.5| > 0.15 keeps voice active
+//     during dawn descent and dusk ascent (column acoustics read "quiet" but
+//     organisms are actively migrating — the movement itself is the signal)
+//
+// v8 (corridor CoM + auto-detect):
+//   - DVM depth: corridor center-of-mass (50-600m) replaces dual-zone log-ratio
+//     Excludes DSL (>600m) which biased all ratio approaches at 38 kHz
+//   - Night/day depth auto-detected from bimodal CoM distribution
+//   - Sunrise/sunset auto-detected from velocity extrema (no hardcoded hours)
+//   - Section boundaries (night/dawn/day/dusk) read from JSON metadata
+//   - JSON filename: sonification_sc_v8_*.json
 // -------------------------------------------------------------------------
 SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
     entropy=0.65, velocity=0.5, anomaly=0.5, intensity=0.5,
-    onset=0.0,
+    onset=0.0, ipc=1.0, microPitch=0.0,
+    phraseGate=1.0,
     h0=0.0, h1=0.0, h2=0.0, h3=0.0, h4=0.0, h5=0.0, h6=0.0, h7=0.0,
     gate=1, lagTime=2.0|
 
-    var sig, env;
+    var carrierSig, subSig, env;
     var entScaled, velAbs;
-    var modRatio, modIndex, mod;
+    var modRatio, modIndex, modIndexLive, mod;
     var carrier1, carrier2, detune;
     var beatVoice, beatAmp;
-    var sub, subAmp;
+    var subAmp;
     var vibRate, vibDepth, vibrato;
     var lpfFreq, breath, ampMod, pan;
-    var histPartials, histAmp, histAmps, partialRatios, histGain;
+    var histPartials, histAmp, histAmps, partialRatios, histGain, histSpread;
     var onsetEnv;
+    var ipcGrain, microPitchHz, freqLive;
+    var turbulence;
+    var phraseEnv, finalSig;
 
     // Smooth all inputs — biological processes are continuous
     freq      = Lag.kr(freq, lagTime);
@@ -183,6 +265,13 @@ SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
     velocity  = Lag.kr(velocity, lagTime);
     anomaly   = Lag.kr(anomaly, lagTime);
     intensity = Lag.kr(intensity, lagTime);
+    ipc       = Lag.kr(ipc, lagTime * 0.3);      // texture responds fast
+    microPitch = Lag.kr(microPitch, lagTime * 0.4);
+
+    // Phrase gate: asymmetric smoothing — gentle attack, slow release.
+    // Attack 0.6s: carrier fades in smoothly (avoids click on complex FM signal)
+    // Release 2.5s: phrase dissolves gracefully, leaving reverb tail + sub behind
+    phraseEnv = Lag2UD.kr(phraseGate, 0.6, 2.5);
 
     // Histogram partials — slightly faster response than main timbre
     h0 = Lag.kr(h0, lagTime * 0.5);
@@ -207,6 +296,13 @@ SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
     // velocity_norm: 0 = fast descent, 0.5 = still, 1 = fast ascent
     velAbs = (velocity - 0.5).abs * 2;
 
+    // === MICRO-PITCH (histogram differential) ===
+    // During static phases (day/night), the histogram differential provides
+    // subtle pitch inflections (±4 Hz) that keep the tone alive.
+    // microPitch: 0.5=stable, >0.5=shallow zones gaining, <0.5=deep zones gaining
+    microPitchHz = (microPitch - 0.5) * 8.0;  // ±4 Hz range
+    freqLive = freq + microPitchHz;
+
     // === FM MODULATOR ===
     // Night: ratio near 1 -> pure unison (the carrier and modulator reinforce)
     // Day: ratio -> sqrt(2) -> inharmonic, bell-like overtones
@@ -214,42 +310,54 @@ SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
     modRatio = entScaled.linlin(0, 1, 1.002, 1.4142);
     modIndex = entScaled.linexp(0, 1, 0.08, 5.0);
 
+    // Onset events briefly spike FM index — timbral flash, not just volume
+    // Creates momentary harmonic complexity on acoustic transients
+    modIndexLive = modIndex + (onsetEnv * 3.0);
+
     // Velocity-driven vibrato
     // Still water: near-zero vibrato. Fast transitions: shimmering instability.
     // The dusk ascent (~45 min, max velocity) will have the most vibrato —
     // organisms physically straining upward against gravity.
     vibRate  = velAbs.linlin(0, 0.7, 0.3, 5.5);
-    vibDepth = velAbs.linlin(0, 0.7, 0.0004, 0.005) * freq;
+    vibDepth = velAbs.linlin(0, 0.7, 0.0004, 0.005) * freqLive;
     vibrato  = SinOsc.kr(vibRate) * vibDepth;
 
-    mod = SinOsc.ar((freq + vibrato) * modRatio) * ((freq + vibrato) * modIndex);
+    mod = SinOsc.ar((freqLive + vibrato) * modRatio) * ((freqLive + vibrato) * modIndexLive);
 
     // === DUAL CARRIER (detuned pair) ===
     // Night: 0.15 Hz detuning -> slow, warm beating (like a cello section)
     // Day: 1.5 Hz detuning -> wider, shimmering chorus
     detune   = entScaled.linlin(0, 1, 0.15, 1.5);
-    carrier1 = SinOsc.ar(freq + vibrato + mod);
-    carrier2 = SinOsc.ar(freq + vibrato + detune + (mod * 0.85));
-    sig = (carrier1 + carrier2) * 0.5;
+    carrier1 = SinOsc.ar(freqLive + vibrato + mod);
+    carrier2 = SinOsc.ar(freqLive + vibrato + detune + (mod * 0.85));
+    carrierSig = (carrier1 + carrier2) * 0.5;
+
+    // === IPC TEXTURE (turbulence granularity) ===
+    // When inter-ping correlation drops (turbulent water column), the tone
+    // develops subtle amplitude granularity — a shimmer that conveys instability.
+    // ipc: 1.0=stable (no grain), 0.0=turbulent (maximum grain)
+    // Uses ring-modulation at 8-14 Hz, depth controlled by inverse IPC.
+    turbulence = (1.0 - ipc).clip(0, 1);
+    ipcGrain = SinOsc.kr(
+        turbulence.linlin(0, 0.6, 8, 14),  // grain rate: faster when more turbulent
+        0,
+        turbulence.linlin(0, 0.6, 0, 0.15),  // grain depth: 0-15% amplitude modulation
+        1.0
+    );
+    carrierSig = carrierSig * ipcGrain;
 
     // === ANOMALY BEATING ===
     // When center-of-mass deviates from expected DVM curve -> tension
     // anomaly_norm: 0.5 = on track, 0 or 1 = strong deviation
     // Creates subtle interference patterns — biological unease made audible
     beatAmp   = anomaly.linlin(0.35, 0.65, 0, 0.25).clip(0, 0.25);
-    beatVoice = SinOsc.ar(freq * (1 + anomaly.linlin(0.35, 0.65, 0, 0.006)));
-    sig = sig + (beatVoice * beatAmp);
-
-    // === SUB-HARMONIC ===
-    // Octave below the fundamental — adds physical weight when deep
-    // Below ~180 Hz: organisms are at depth, you feel the ocean's mass
-    // Above ~180 Hz: organisms are shallow, tone is lighter and clearer
-    subAmp = freq.explin(55, 180, 0.2, 0.0).clip(0, 0.2);
-    sub    = SinOsc.ar(freq * 0.5) * subAmp;
-    sig = sig + sub;
+    beatVoice = SinOsc.ar(freqLive * (1 + anomaly.linlin(0.35, 0.65, 0, 0.006)));
+    carrierSig = carrierSig + (beatVoice * beatAmp);
 
     // === HISTOGRAM PARTIALS ===
-    // 8 sine partials whose amplitudes are driven by depth-zone energy.
+    // 8 partials whose amplitudes are driven by depth-zone energy.
+    // Each partial is a detuned pair — spread widens with zone energy,
+    // creating spectral width proportional to biomass presence.
     // The timbre literally IS the vertical distribution of biomass.
     //
     // Partial mapping (inverted: shallow zones → high partials, deep → low):
@@ -263,21 +371,32 @@ SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
     //   Zone 7 (DVM corridor 280-580) → 1.25x (major third — warm, swells during transit)
     partialRatios = #[4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 1.25];
     histAmps = [h0, h1, h2, h3, h4, h5, h6, h7];
-    histGain = 0.12;
+    histGain = 0.22;
 
     histPartials = 8.collect({ |i|
-        SinOsc.ar(freq * partialRatios[i]) * histAmps[i];
+        // Each zone becomes a detuned pair: spread proportional to amplitude.
+        // Active zones shimmer; silent zones cost nothing.
+        histSpread = histAmps[i] * 1.2;  // max ±1.2 Hz spread per partial
+        (SinOsc.ar(freqLive * partialRatios[i] + histSpread)
+        + SinOsc.ar(freqLive * partialRatios[i] - histSpread)) * 0.5 * histAmps[i];
     });
     histAmp = Mix.ar(histPartials) * histGain;
-    sig = sig + histAmp;
+    carrierSig = carrierSig + histAmp;
 
     // === VELOCITY -> BRIGHTNESS ===
     // Ascending (velocity > 0.5): LPF opens -> brighter, like rising toward light
     // Descending (velocity < 0.5): LPF closes -> darker, sinking into the deep
     // Static (velocity ~ 0.5): moderate brightness
-    lpfFreq = velocity.linexp(0.15, 0.85, freq * 2, freq * 14);
-    sig = LPF.ar(sig, lpfFreq.clip(80, 18000));
-    sig = HPF.ar(sig, 28);
+    lpfFreq = velocity.linexp(0.15, 0.85, freqLive * 2, freqLive * 14);
+    carrierSig = LPF.ar(carrierSig, lpfFreq.clip(80, 18000));
+    carrierSig = HPF.ar(carrierSig, 28);
+
+    // === SUB-HARMONIC (bypasses phrase gate) ===
+    // Octave below the fundamental — adds physical weight when deep.
+    // Persists during phrase rests as a depth-awareness anchor.
+    // The listener always knows "where" in the water column we are.
+    subAmp = freqLive.explin(40, 300, 0.3, 0.0).clip(0, 0.3);
+    subSig = SinOsc.ar(freqLive * 0.5) * subAmp;
 
     // === ORGANIC BREATH ===
     // Very slow amplitude modulation (~15s cycle, +/- 4%)
@@ -286,22 +405,32 @@ SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
 
     // === DYNAMICS ===
     // Intensity (overall acoustic energy) modulates presence
-    // Low energy: tone recedes but never disappears (floor at 0.35)
-    // High energy: full presence
-    ampMod = intensity.linlin(0.15, 0.85, 0.35, 1.0).clip(0.35, 1.0);
-    // Onset events create brief amplitude swells (+25% max)
-    // The asymmetric envelope (fast attack, slow release) makes these organic
-    ampMod = ampMod * (1.0 + (onsetEnv * 0.25));
+    // Lower floor (0.15) allows wider dynamic range across the 24h cycle
+    ampMod = intensity.linlin(0.15, 0.85, 0.15, 1.0).clip(0.15, 1.0);
+    // Onset events: amplitude swell (+35%) plus the FM index spike above
+    // Together these create compound timbral transients — brighter AND louder
+    ampMod = ampMod * (1.0 + (onsetEnv * 0.35));
+
+    // === PHRASE GATING ===
+    // The carrier signal (FM + histogram + anomaly) passes through the phrase gate.
+    // The sub-harmonic BYPASSES the gate — it persists as a depth anchor during rests.
+    //
+    // Scientific meaning:
+    //   Phrase ON  = acoustic activity (organisms moving, layers interacting)
+    //   Phrase OFF = acoustic stillness (stable column, no events)
+    //   The listener hears silence as "nothing is changing in the water column."
+    //   The sub-harmonic reminds them where the organisms are hiding.
+    finalSig = (carrierSig * phraseEnv) + subSig;
 
     // === SPATIAL ===
     // Ascending: slight right pan. Descending: slight left.
     // Subtle, not distracting — just a sense of directionality.
     pan = velocity.linlin(0.2, 0.8, -0.3, 0.3);
-    sig = Pan2.ar(sig, pan);
+    finalSig = Pan2.ar(finalSig, pan);
 
     // === OUTPUT ===
     env = EnvGen.kr(Env.asr(4, 1, 5), gate, doneAction: 2);
-    Out.ar(out, sig * env * amp * ampMod * breath);
+    Out.ar(out, finalSig * env * amp * ampMod * breath);
 }).add;
 
 
@@ -319,6 +448,8 @@ SynthDef(\migrationArc, { |out=0, freq=200, amp=0.3,
 SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
     masterVol=0.75|
     var sig;
+    // Smooth mix to prevent clicks when phrase gate toggles reverb wet ±20%
+    mix  = Lag.kr(mix, 0.5);
     sig = In.ar(in, 2);
     sig = FreeVerb2.ar(sig[0], sig[1], mix, room, damp);
     sig = HPF.ar(sig, 35);   // prevent sub-bass mud from reverb tail
@@ -326,7 +457,7 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
     Out.ar(out, sig * masterVol);
 }).add;
 
-"SynthDefs loaded: migrationArc, migrationReverb.".postln;
+"SynthDefs loaded: migrationArc (v6), migrationReverb.".postln;
 )
 
 
@@ -370,10 +501,10 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
             var colW = (w / ~vizN).ceil + 1;
             var hourFrac = ~vizHourTrace[i] ? 0;
             var bgColor = case
-                { hourFrac < (5.75 / 24) }  { Color.new255(10, 18, 45, 50) }   // night: deep blue
-                { hourFrac < (8.5 / 24) }   { Color.new255(90, 55, 15, 45) }   // dawn: amber
-                { hourFrac < (19.5 / 24) }  { Color.new255(65, 60, 20, 30) }   // day: pale gold
-                { hourFrac < (20.25 / 24) } { Color.new255(90, 35, 55, 50) }   // dusk: warm pink
+                { hourFrac < ~sunriseFrac }  { Color.new255(10, 18, 45, 50) }   // night: deep blue
+                { hourFrac < ~dawnEndFrac }  { Color.new255(90, 55, 15, 45) }   // dawn: amber
+                { hourFrac < ~duskStartFrac }{ Color.new255(65, 60, 20, 30) }   // day: pale gold
+                { hourFrac < ~sunsetFrac }   { Color.new255(90, 35, 55, 50) }   // dusk: warm pink
                 { true }                     { Color.new255(10, 18, 45, 50) };  // night
 
             Pen.fillColor_(bgColor);
@@ -421,44 +552,58 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
             Pen.stroke;
         };
 
-        // --- Depth trace: glow layer (thick, soft) ---
-        Pen.strokeColor_(Color.new255(100, 170, 255, 50));
-        Pen.width_(5);
-        Pen.moveTo(0 @ ((~vizDepthTrace[0] / depthMax) * h));
+        // --- Raw depth preview (dim, full timeline, shows unplayed data) ---
+        Pen.strokeColor_(Color.new255(100, 160, 220, 25));
+        Pen.width_(1);
+        Pen.moveTo(0 @ ((~vizRawPreview[0] / depthMax).clip(0, 1) * h));
         ~vizN.do { |i|
             var x = (i / (~vizN - 1)) * w;
-            var y = ((~vizDepthTrace[i] ? 400) / depthMax).clip(0, 1) * h;
+            var y = ((~vizRawPreview[i] ? 400) / depthMax).clip(0, 1) * h;
             Pen.lineTo(x @ y);
         };
         Pen.stroke;
 
-        // --- Depth trace: main line (thin, bright) ---
-        Pen.strokeColor_(Color.new255(180, 215, 255, 220));
-        Pen.width_(1.5);
-        Pen.moveTo(0 @ ((~vizDepthTrace[0] / depthMax) * h));
-        ~vizN.do { |i|
-            var x = (i / (~vizN - 1)) * w;
-            var y = ((~vizDepthTrace[i] ? 400) / depthMax).clip(0, 1) * h;
-            Pen.lineTo(x @ y);
-        };
-        Pen.stroke;
+        // --- Real-time heard-depth trail (played portion only) ---
+        // Glow layer
+        if((~vizLastIdx ? 0) > 1) {
+            var lastIdx = ~vizLastIdx.min(~vizN - 1);
+            Pen.strokeColor_(Color.new255(100, 170, 255, 40));
+            Pen.width_(4);
+            Pen.moveTo(0 @ (((~vizHeardTrail[0] ? 400) / depthMax).clip(0, 1) * h));
+            (lastIdx + 1).do { |i|
+                var x = (i / (~vizN - 1)) * w;
+                var y = ((~vizHeardTrail[i] ? 400) / depthMax).clip(0, 1) * h;
+                Pen.lineTo(x @ y);
+            };
+            Pen.stroke;
 
-        // --- Current depth marker (bright dot on the arc) ---
-        // Interpolate vizDepthTrace so dot rides exactly on the drawn line
+            // Main line
+            Pen.strokeColor_(Color.new255(160, 200, 240, 150));
+            Pen.width_(1.2);
+            Pen.moveTo(0 @ (((~vizHeardTrail[0] ? 400) / depthMax).clip(0, 1) * h));
+            (lastIdx + 1).do { |i|
+                var x = (i / (~vizN - 1)) * w;
+                var y = ((~vizHeardTrail[i] ? 400) / depthMax).clip(0, 1) * h;
+                Pen.lineTo(x @ y);
+            };
+            Pen.stroke;
+        };
+
+        // --- Depth marker (rides on the real-time trail) ---
+        // The dot and trail are written from the same value (heardDepthSmoothed),
+        // so the dot always sits exactly on the trail line at the playhead.
         if(pct > 0.001) {
             var cx = pct * w;
-            var vizIdx = (pct * (~vizN - 1)).clip(0, ~vizN - 1);
-            var vizLo = vizIdx.floor.asInteger;
-            var vizHi = (vizLo + 1).min(~vizN - 1);
-            var vizFrac = vizIdx - vizLo;
-            var dotDepth = (~vizDepthTrace[vizLo] * (1 - vizFrac)) + (~vizDepthTrace[vizHi] * vizFrac);
-            var cy = (dotDepth / depthMax).clip(0, 1) * h;
+            var heardY = ((~heardDepthM ? 400) / depthMax).clip(0, 1) * h;
+            // Smoothed alpha: fades gradually with audio envelope (no visual pop)
+            var dotAlpha = ((~phraseAlpha ? 1.0) * 150 + 80).asInteger.clip(80, 230);
+
             // Outer glow
-            Pen.fillColor_(Color.new255(255, 255, 255, 80));
-            Pen.fillOval(Rect(cx - 7, cy - 7, 14, 14));
+            Pen.fillColor_(Color.new255(255, 255, 255, (dotAlpha * 0.35).asInteger));
+            Pen.fillOval(Rect(cx - 7, heardY - 7, 14, 14));
             // Inner dot
-            Pen.fillColor_(Color.new255(255, 255, 255, 230));
-            Pen.fillOval(Rect(cx - 3.5, cy - 3.5, 7, 7));
+            Pen.fillColor_(Color.new255(255, 255, 255, dotAlpha));
+            Pen.fillOval(Rect(cx - 3.5, heardY - 3.5, 7, 7));
         };
 
         // --- Green playhead ---
@@ -617,11 +762,21 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
     // Data values
     var depthVal, entropyVal, velocityVal, anomalyVal, intensityVal;
     var depthRawVal, velRawVal, hourVal;
+    var heardDepthM;  // windowed depth in meters (matches audio pitch)
+    var heardDepthSmoothed = 400;  // exponential smoother to approximate Lag.kr(freq, 2.0)
+    var smoothAlpha = 1 - (-0.05 / 2.0).exp;  // dt=50ms, tau=2.0s -> ~0.0247
     var entScaled;
-    // Histogram + onset + adaptive window
+    // Histogram + onset + IPC + micro-pitch + adaptive window
     var h0val, h1val, h2val, h3val, h4val, h5val, h6val, h7val;
-    var onsetVal;
+    var onsetVal, ipcVal, ipcRawVal, microPitchVal;
     var velPreview, velMag, adaptiveWindow;
+
+    // Phrase gate state (with hysteresis)
+    var phraseGateVal = 1.0;
+    var phraseOnTimer = 0;    // frames since last gate-ON
+    var phraseOffTimer = 0;   // frames since last gate-OFF
+    var phraseRaw = 1.0;      // raw gate decision before hysteresis
+    var minOnFrames, minOffFrames;
 
     // Section tracking
     var section = \night1, lastSection = \none;
@@ -647,6 +802,13 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
 
     0.5.wait;
     ~playing = true;
+
+    // Phrase gate hysteresis: minimum hold times to create musical phrases.
+    // Short holds (2s/1s) created metronomic 3.1s pulsing from IPC noise.
+    // Longer holds produce organic phrases: 5s of voice, 3s of sub + reverb.
+    // At 20 Hz update rate: 100 frames = 5s ON, 60 frames = 3s OFF.
+    minOnFrames  = (5.0 / updateRate).round.asInteger;   // stay ON at least 5s
+    minOffFrames = (3.0 / updateRate).round.asInteger;    // stay OFF at least 3s
 
     while({ currentTime < ~totalDuration and: { ~playing } }, {
 
@@ -684,15 +846,109 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
         // Onset strength (nearest-sample to preserve transient spikes)
         onsetVal = ~getRaw.(~onset, ~times, currentTime, ~compression);
 
+        // Inter-ping correlation: two reads for different purposes.
+        // Raw (nearest-sample): feeds synth ring-mod grain — preserves fast texture
+        // Windowed mean: feeds phrase gate — smooths bimodal spikes so individual
+        // noisy pings don't retrigger the gate every 3 seconds
+        ipcRawVal = ~getRaw.(~ipc, ~times, currentTime, ~compression);
+        ipcVal = ~getValue.(~ipc, ~times, currentTime, ~compression, 2.0 * ~speed);
+
+        // Micro-pitch from histogram differential: weighted sum across zones.
+        // Shallow zones gaining energy (>0.5) push pitch slightly up;
+        // deep zones gaining push pitch down. Creates subtle life in static phases.
+        microPitchVal = 8.collect({ |b|
+            var diffVal = ~getValue.(~histDiffShort[b], ~times, currentTime, ~compression, 1.5 * ~speed);
+            var weight = #[0.8, 0.6, 0.4, 0.2, -0.2, -0.4, -0.6, 0.1][b];  // shallow=positive, deep=negative
+            (diffVal - 0.5) * weight;
+        }).sum;
+        // Re-center to 0.5 and clip to [0, 1]
+        microPitchVal = (microPitchVal + 0.5).clip(0, 1);
+
         entScaled = entropyVal.linlin(0.6, 0.9, 0, 1).clip(0, 1);
+
+        // ===== HEARD DEPTH (for GUI sync) =====
+        // "Heard depth" = the depth implied by the pitch the listener hears.
+        // The pitch mapping is non-linear (linexp), so this differs from the raw
+        // linear depth, especially at the extremes where linexp compresses.
+        //
+        // Pipeline: depthVal -> linexp(0.15,1.0,45,650) -> freq Hz
+        //           freq Hz  -> explin(45,650,620,120)   -> "heard" meters
+        //
+        // This reveals where the pitch mapping distorts: if heard != raw,
+        // the listener is perceiving a different depth than the data shows.
+        heardDepthM = depthVal.linexp(0.15, 1.0, 45, 650).clip(40, 700)
+            .explin(45, 650, 620, 120).clip(50, 1000);
+
+        // Exponential smoother: approximates Lag.kr(freq, 2.0) in the synth.
+        // This makes heardDepthSmoothed track what the listener actually hears,
+        // including the ~2s lag that smooths pitch transitions.
+        heardDepthSmoothed = heardDepthSmoothed + (smoothAlpha * (heardDepthM - heardDepthSmoothed));
+
+        // ===== PHRASE GATE =====
+        // Determines whether the carrier voice is active or resting.
+        //
+        // Scientific logic:
+        //   Active (gate=1): intensity is notably high, OR the column is turbulent
+        //                    (low IPC), OR an onset transient is firing.
+        //   Rest (gate=0):   intensity is moderate-to-low AND column is stable
+        //                    AND no onsets — "the water column is quiet."
+        //
+        // Thresholds are data-driven (day intensity: p10=0.74, p50=0.77, p90=0.80):
+        //   intensity > 0.78  → above-median energy, something notable
+        //   ipc < 0.5         → genuine turbulence (bimodal: mostly ~0.99 or ~0.0)
+        //   onset > 0.15      → meaningful transient (p90 of day onset ~0.07)
+        //   |velocity - 0.5| > 0.15 → organisms are actively migrating (dawn/dusk)
+        //     velocity_norm 0.5 = stationary; deviations = ascending or descending
+        //     0.15 threshold catches the gradual dawn descent that column acoustics miss
+        //
+        // Hysteresis prevents rapid flickering between states.
+        phraseRaw = if(
+            (intensityVal > 0.78) or: { ipcVal < 0.5 } or: { onsetVal > 0.15 }
+            or: { (velocityVal - 0.5).abs > 0.15 }
+        ) { 1.0 } { 0.0 };
+
+        // Apply hysteresis: enforce minimum hold times
+        if(phraseRaw > 0.5) {
+            // Wants to be ON
+            if(phraseGateVal < 0.5) {
+                // Currently OFF -> switch ON only if OFF long enough
+                if(phraseOffTimer >= minOffFrames) {
+                    phraseGateVal = 1.0;
+                    phraseOnTimer = 0;
+                    phraseOffTimer = 0;
+                } {
+                    phraseOffTimer = phraseOffTimer + 1;
+                };
+            } {
+                // Already ON -> stay ON, reset timer
+                phraseOnTimer = phraseOnTimer + 1;
+                phraseOffTimer = 0;
+            };
+        } {
+            // Wants to be OFF
+            if(phraseGateVal > 0.5) {
+                // Currently ON -> switch OFF only if ON long enough
+                if(phraseOnTimer >= minOnFrames) {
+                    phraseGateVal = 0.0;
+                    phraseOffTimer = 0;
+                    phraseOnTimer = 0;
+                } {
+                    phraseOnTimer = phraseOnTimer + 1;
+                };
+            } {
+                // Already OFF -> stay OFF
+                phraseOffTimer = phraseOffTimer + 1;
+                phraseOnTimer = 0;
+            };
+        };
 
         // ===== SECTION DETECTION =====
         candidateSection = case
-            { hourVal < (5.75  / 24) } { \night1 }
-            { hourVal < (8.5   / 24) } { \dawn   }
-            { hourVal < (19.5  / 24) } { \day    }
-            { hourVal < (20.25 / 24) } { \dusk   }
-            { true }                    { \night2 };
+            { hourVal < ~sunriseFrac }   { \night1 }
+            { hourVal < ~dawnEndFrac }   { \dawn   }
+            { hourVal < ~duskStartFrac } { \day    }
+            { hourVal < ~sunsetFrac }    { \dusk   }
+            { true }                     { \night2 };
 
         if(candidateSection != section) {
             sectionHoldCount = sectionHoldCount + 1;
@@ -728,27 +984,42 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
         };
 
         // ===== UPDATE MIGRATION VOICE =====
-        // Pitch: dvm_depth_norm -> 80-500 Hz (E2 to B4)
-        // Night (dvm ~0.86, 180m): ~410 Hz (Ab4) — warm, present
-        // Day (dvm ~0.37, 550m):   ~140 Hz (C#3) — deep, felt
-        // Dawn descent: ~410 -> 140 Hz over ~55s — ~1.6 octave slide down
-        // Dusk ascent:  ~140 -> 410 Hz in ~15s — rapid sweep up
+        // Pitch: non-linear mapping that stretches the transition range.
+        // depthVal is dvm_depth_norm: 0=deep(800m), 1=shallow(100m).
+        // Actual data range: night ~0.86, day ~0.37.
+        //
+        // Piecewise exponential: the mid-range (0.35-0.75) where dawn/dusk
+        // transitions happen gets expanded perceptually, while the endpoints
+        // (where pitch is near-static) are compressed.
+        //   depthVal 0.20 ->  45 Hz (F#1)  — lowest usable fundamental
+        //   depthVal 0.37 ->  90 Hz (F#2)  — day refuge
+        //   depthVal 0.55 -> 200 Hz (G3)   — mid-transition
+        //   depthVal 0.75 -> 380 Hz (F#4)  — approaching surface
+        //   depthVal 0.90 -> 560 Hz (C#5)  — night feeding
+        //   depthVal 1.00 -> 650 Hz (E5)   — extreme shallow
+        // Total usable range: ~2.6 octaves (F#2 to C#5), with 3.8 octaves available.
         migSynth.set(
-            \freq,      depthVal.linexp(0.2, 1.0, 65, 520).clip(60, 560),
+            \freq,      depthVal.linexp(0.15, 1.0, 45, 650).clip(40, 700),
             \amp,       ~masterVol * 0.5,
             \entropy,   entropyVal,
             \velocity,  velocityVal,
             \anomaly,   anomalyVal,
             \intensity, intensityVal,
             \onset,     onsetVal,
+            \ipc,       ipcRawVal,  // raw IPC for texture granularity
+            \microPitch, microPitchVal,
+            \phraseGate, phraseGateVal,
             \h0, h0val, \h1, h1val, \h2, h2val, \h3, h3val,
             \h4, h4val, \h5, h5val, \h6, h6val, \h7, h7val
         );
 
         // ===== UPDATE REVERB =====
         // Night: intimate room. Day: vast cathedral.
+        // During phrase rests: reverb mix increases — sound dissolves into space.
+        // This creates a natural "the signal diffuses" effect as the carrier fades.
         fxSynth.set(
-            \mix,       entScaled.linlin(0, 1, 0.12, 0.45),
+            \mix,       entScaled.linlin(0, 1, 0.12, 0.45)
+                        + ((1.0 - phraseGateVal) * 0.2),  // +20% wet during rests
             \room,      entScaled.linlin(0, 1, 0.2, 0.82),
             \damp,      entScaled.linlin(0, 1, 0.55, 0.18),
             \masterVol, ~masterVol
@@ -757,21 +1028,36 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
         // ===== GUI UPDATE =====
         ~currentTime = currentTime;
         ~depthRawVal = depthRawVal;
+        ~heardDepthM = heardDepthSmoothed;  // smoothed to match Lag.kr in synth
+        ~phraseActive = phraseGateVal > 0.5;
+
+        // Write heard depth into the real-time trail (guarantees line = dot)
+        {
+            var vizIdx = ((currentTime / ~totalDuration) * ~vizN).floor.asInteger.clip(0, ~vizN - 1);
+            ~vizHeardTrail[vizIdx] = heardDepthSmoothed;
+            ~vizLastIdx = vizIdx;
+        }.value;
+        // Smooth visual alpha to match audio envelope (no instant pop)
+        // tau=0.5s for both attack and release — fast enough to track, smooth enough to not pop
+        ~phraseAlpha = ~phraseAlpha + ((1 - (-0.05 / 0.5).exp) * (phraseGateVal - ~phraseAlpha));
 
         {
             var rHour = (hourVal * 24).floor.asInteger;
             var rMin  = ((hourVal * 24 * 60) % 60).floor.asInteger;
             var velDir = if(velRawVal > 0) { " asc" } { " dsc" };
+            var phraseStr = if(phraseGateVal > 0.5) { "" } { " [rest]" };
 
             if(~infoDisplay.notNil and: { ~infoDisplay.isClosed.not }) {
                 ~infoDisplay.string_(
                     "UTC: " ++ rHour.asString.padLeft(2, "0") ++ ":" ++
                     rMin.asString.padLeft(2, "0") ++
-                    "   Depth: " ++ depthRawVal.round(1) ++ "m" ++
-                    "   Vel: " ++ velRawVal.round(0.1) ++ " m/h" ++ velDir ++
+                    "   Heard: " ++ heardDepthSmoothed.round(1) ++ "m" ++
+                    "   Data: " ++ depthRawVal.round(1) ++ "m" ++
+                    phraseStr ++
                     "\nEntropy: " ++ entropyVal.round(0.001) ++
-                    "   Anomaly: " ++ anomalyVal.round(0.01) ++
-                    "   Intensity: " ++ intensityVal.round(0.01)
+                    "   Intensity: " ++ intensityVal.round(0.01) ++
+                    "   IPC: " ++ ipcVal.round(0.01) ++
+                    "   Gate: " ++ if(phraseGateVal > 0.5) { "ON" } { "off" }
                 );
             };
 
@@ -817,6 +1103,9 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
 // --- Transport controls ---
 ~playComposition = {
     ~playing = false;
+    // Reset real-time trail for fresh playback
+    ~vizN.do { |i| ~vizHeardTrail[i] = nil };
+    ~vizLastIdx = 0;
     ~composition.reset;
     ~composition.play;
     "Playing migration arc...".postln;
@@ -841,33 +1130,59 @@ SynthDef(\migrationReverb, { |in, out=0, mix=0.3, room=0.5, damp=0.3,
 WHAT TO LISTEN FOR:
 
 Night (0:00-1:55):
-  A warm, clear tone around Ab4 (410 Hz). Near-pure sine with gentle
+  A warm, clear tone around C#5 (560 Hz). Near-pure sine with gentle
   chorus from the detuned carrier pair. Intimate reverb. The organisms
   are packed in dense layers near the surface (~180m) — organized,
-  purposeful. Entropy is low, so the FM index is minimal.
+  purposeful. Entropy is low, so the FM index is minimal. Histogram
+  partials shimmer faintly — biomass concentrated in the upper zones.
+  The phrase gate is mostly open — the voice is sustained and present.
 
 Dawn descent (1:55-2:50):
-  The pitch falls steadily — about 1.6 octaves over a minute. As
+  The pitch drops dramatically — about 2.6 octaves over a minute. As
   entropy rises, the timbre complexifies: new overtones bloom, the
   sound becomes richer and more ambiguous. The reverb opens up. The
   organisms are dispersing, sinking, spreading thin. The LPF closes
-  as they descend — the sound darkens.
+  as they descend — the sound darkens. Listen for timbral flashes on
+  onset events (brief FM index spikes) as layers reorganize. The voice
+  may briefly rest during calm moments in the transition — only the
+  sub-harmonic and reverb tail persist, reminding you of the depth.
 
 Day (2:50-6:30):
-  A lower, rich drone around C#3 (140 Hz). Complex FM harmonics shift
-  slowly. Vast reverb. This is the longest section — near-stillness.
-  The sub-harmonic (octave below) adds physical weight. The FM ratio
-  near sqrt(2) creates bell-like inharmonic overtones that wander.
-  The organisms are hiding ~500m below the surface.
+  A deep drone around F#2 (90 Hz) with strong sub-harmonic weight.
+  Complex FM harmonics shift slowly. Vast reverb. The voice BREATHES:
+  during quiet stretches (high IPC, low intensity), the carrier fades
+  to silence, leaving only the sub-harmonic octave below — you feel the
+  ocean's weight without hearing the voice. When intensity rises or
+  the column becomes turbulent (IPC drops), the voice re-enters with a
+  timbral bloom. Listen for:
+    - Micro-pitch inflections (±4 Hz) from histogram differential
+    - Amplitude shimmer from IPC drops (turbulent column events)
+    - FM index flashes on onset transients (layer reorganizations)
+    - The reverb swelling during rests (sound dissolves into space)
+  Silence means "nothing is changing." Sound means "something is happening."
 
 Dusk ascent (6:30-7:00):
   The pitch sweeps up as organisms race toward the surface. The timbre
   clarifies — complex FM resolves toward pure sine. Vibrato intensifies.
-  The LPF opens wide — brightness floods in. Reverb contracts.
+  The LPF opens wide — brightness floods in. Reverb contracts. The
+  sub-harmonic fades as pitch rises above 300 Hz. The voice is fully
+  active — the dusk ascent is the most energetic part of the cycle.
 
 Night return (7:00-8:00):
   Resolution. The warm, clear tone returns. The cycle is complete.
   Tomorrow it happens again.
+
+GUI NOTES:
+  The line and dot both show "heard depth" — the depth implied by the audio
+  pitch, smoothed to match the synth's Lag.kr. The dot rides on the line at
+  the playhead position, fading gradually with the phrase envelope.
+
+  "Heard" = smoothed depth matching the audio pitch (120-620m range).
+  "Data" = raw DVM depth from the dual-zone log-ratio algorithm (meters).
+  "[rest]" = phrase gate is closed, carrier is silent, sub persists.
+
+  Rest periods occur when the water column is quiet: intensity below the
+  day median (~0.78), IPC stable (>0.5), and no onset transients (<0.15).
 
 NEXT SKETCHES:
   02 — Layer events (Klank bells on scattering layer birth/death)

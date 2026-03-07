@@ -740,36 +740,38 @@ def compute_histogram_zones(sv_data, depth_values, config):
     return hist_local, hist_global, diff_short, diff_medium
 
 
-def compute_dvm_depth(sv_data, depth_values, config, sonification_mode=False):
-    """Compute DVM depth using dual-zone log-ratio.
+def compute_dvm_depth(sv_data, depth_values, config, sonification_mode=False,
+                      time_seconds=None):
+    """Compute DVM depth using corridor center-of-mass.
 
-    Tracks the Diel Vertical Migration by comparing acoustic energy between
-    shallow and deep zones of the water column. Uses two zone pairs — narrow
-    (core DVM bands) and wide (stability) — blended for robustness.
+    v9: Replaces the dual-zone log-ratio with corridor center-of-mass (CoM)
+    restricted to 50–600 m. This excludes both surface noise (0–50 m) and
+    the persistent deep scattering layer (DSL, >600 m), which at 38 kHz is
+    always brighter than the migrating layer due to myctophid swim bladder
+    resonance. The DSL biased all previous ratio-based approaches.
 
-    Why this works:
-      At 38 kHz, the persistent deep scattering layer (DSL) at ~600 m has
-      higher absolute Sv than the migrating surface layer (myctophid swim
-      bladder resonance), so peak-based approaches cannot distinguish them.
-      The log-ratio of shallow/deep energy tracks the spatial REDISTRIBUTION
-      of scatterers without being biased by absolute intensity:
-        - Night: migrants feed at surface → shallow energy high → ratio high
-        - Day: migrants descend to refuge depth → deep energy high → ratio low
-        - Dawn/dusk: smooth ratio transition as organisms migrate
+    The corridor CoM directly tracks the energy-weighted mean depth of
+    organisms within the DVM-active corridor. Compared to the v8 log-ratio:
+      - Night depth: 156 m vs 308 m (echogram shows ~180 m → CoM is closer)
+      - Day depth: 494 m vs 484 m (similar)
+      - Total swing: 338 m vs 176 m (nearly 2× more pitch range)
+      - Dusk recovery: 39% vs 22% (still limited by 38 kHz DSL physics)
 
-      The narrow zone pair (150–250 m vs 450–550 m) targets the core DVM
-      bands where energy changes most dramatically. The wide pair (100–300 m
-      vs 400–600 m) provides stability by averaging over a broader corridor.
-      Blending both gives a robust, high-contrast DVM signal.
+    Auto-detection:
+      After smoothing, the algorithm extracts night/day depth medians from the
+      bimodal distribution of the CoM signal and detects sunrise/sunset from
+      velocity extrema. All parameters are stored in the returned metadata dict
+      so the SC sketch needs no hardcoded geographic/temporal values.
 
     Algorithm:
-      1. Bin Sv into 10 m depth bins (linear power space)
-      2. Time-average each bin with a sliding window (~30 min)
-      3. Compute log₁₀(shallow/deep) for both zone pairs
-      4. Apply median filter (edge-preserving denoising)
-      5. Blend the two log-ratios
-      6. Map blended ratio to physical depth via percentile normalization
-      7. Smooth with uniform filter for musical continuity
+      1. Restrict Sv to corridor (50–600 m), convert to linear power
+      2. Time-average each depth sample with a sliding window
+      3. Compute energy-weighted center-of-mass per ping
+      4. Median filter (preserves sharp dawn/dusk transitions)
+      5. Uniform filter for musical continuity
+      6. Auto-detect night/day depth from signal bimodality
+      7. Percentile normalization → physical depth mapping
+      8. Auto-detect sunrise/sunset from velocity peaks
 
     Parameters
     ----------
@@ -779,17 +781,26 @@ def compute_dvm_depth(sv_data, depth_values, config, sonification_mode=False):
         Depth array in meters.
     config : SonificationConfigV3
     sonification_mode : bool
+    time_seconds : np.ndarray, optional
+        Timestamp array for velocity/sunrise detection. If None, velocity
+        and sunrise/sunset detection are skipped.
 
     Returns
     -------
     dvm_depth : np.ndarray, shape (n_pings,)
         Smoothed DVM depth in meters.
+    dvm_meta : dict
+        Auto-detected metadata:
+          corridor_m: (lo, hi) — corridor boundaries used
+          night_depth_m: median night depth
+          day_depth_m: median day depth
+          sunrise_h: detected sunrise hour (UTC)
+          sunset_h: detected sunset hour (UTC)
+          dawn_end_h: end of dawn descent
+          dusk_start_h: start of dusk ascent
     """
     n_pings = sv_data.shape[0]
-    bin_size = config.depth_bin_m
-    depth_bins = np.arange(config.surface_exclusion_m, config.max_depth_m, bin_size)
-    n_bins = len(depth_bins) - 1
-    bin_centers = depth_bins[:-1] + bin_size / 2
+    threshold = config.min_sv_threshold_db
 
     if sonification_mode:
         avg_window = config.son_dvm_avg_window
@@ -800,58 +811,114 @@ def compute_dvm_depth(sv_data, depth_values, config, sonification_mode=False):
         med_window = config.dvm_median_window
         smooth_window = config.dvm_smooth_window
 
-    # Step 1: Bin Sv into depth bins (linear power space)
-    binned_linear = np.zeros((n_pings, n_bins))
-    for b in range(n_bins):
-        mask = (depth_values >= depth_bins[b]) & (depth_values < depth_bins[b + 1])
-        if np.any(mask):
-            sv_band = sv_data[:, mask]
-            sv_clean = np.where(
-                np.isnan(sv_band) | (sv_band <= config.min_sv_threshold_db),
-                -90.0, sv_band
-            )
-            binned_linear[:, b] = np.mean(10 ** (sv_clean / 10), axis=1)
+    # --- Step 1: Restrict to DVM corridor and convert to linear ---
+    corridor_lo, corridor_hi = 50.0, 600.0
+    corr_mask = (depth_values >= corridor_lo) & (depth_values < corridor_hi)
+    corr_depth = depth_values[corr_mask]
+    corr_sv = sv_data[:, corr_mask]
+    corr_clean = np.where(
+        np.isnan(corr_sv) | (corr_sv <= threshold), -90.0, corr_sv
+    )
+    corr_linear = 10 ** (corr_clean / 10)
 
-    # Step 2: Time-average each bin
-    binned_smooth = np.zeros_like(binned_linear)
-    for b in range(n_bins):
-        binned_smooth[:, b] = uniform_filter1d(
-            binned_linear[:, b], size=avg_window, mode='nearest'
+    # --- Step 2: Time-average each depth sample ---
+    corr_smooth = np.zeros_like(corr_linear)
+    for j in range(corr_linear.shape[1]):
+        corr_smooth[:, j] = uniform_filter1d(
+            corr_linear[:, j], size=avg_window, mode='nearest'
         )
 
-    # Step 3: Compute log-ratio for both zone pairs
-    def _zone_log_ratio(zone_shallow, zone_deep):
-        s_lo = int(np.searchsorted(bin_centers, zone_shallow[0]))
-        s_hi = int(np.searchsorted(bin_centers, zone_shallow[1]))
-        d_lo = int(np.searchsorted(bin_centers, zone_deep[0]))
-        d_hi = int(np.searchsorted(bin_centers, zone_deep[1]))
-        shallow_energy = binned_smooth[:, s_lo:s_hi].sum(axis=1)
-        deep_energy = binned_smooth[:, d_lo:d_hi].sum(axis=1)
-        return np.log10((shallow_energy + 1e-20) / (deep_energy + 1e-20))
+    # --- Step 3: Energy-weighted center-of-mass per ping ---
+    total_energy = corr_smooth.sum(axis=1)
+    total_energy = np.where(total_energy < 1e-20, 1e-20, total_energy)
+    com_raw = (corr_smooth * corr_depth[np.newaxis, :]).sum(axis=1) / total_energy
 
-    lr_narrow = _zone_log_ratio(config.dvm_shallow_narrow, config.dvm_deep_narrow)
-    lr_wide = _zone_log_ratio(config.dvm_shallow_wide, config.dvm_deep_wide)
+    # --- Step 4: Median filter (edge-preserving) ---
+    com_median = median_filter(com_raw, size=med_window, mode='nearest')
 
-    # Step 4: Median filter (preserves sharp dawn/dusk edges, rejects outliers)
-    lr_narrow = median_filter(lr_narrow, size=med_window, mode='nearest')
-    lr_wide = median_filter(lr_wide, size=med_window, mode='nearest')
+    # --- Step 5: Uniform filter for musical continuity ---
+    com_smooth = uniform_filter1d(com_median, size=smooth_window, mode='nearest')
 
-    # Step 5: Blend narrow and wide log-ratios
-    w = config.dvm_blend_weight
-    log_blend = w * lr_narrow + (1 - w) * lr_wide
+    # --- Step 6: Auto-detect night/day depth from bimodal distribution ---
+    # The CoM signal is bimodal: shallow cluster (night) and deep cluster (day).
+    # Use percentile separation: night = lower quartile, day = upper quartile.
+    p15 = float(np.percentile(com_smooth, 15))
+    p85 = float(np.percentile(com_smooth, 85))
+    night_depth_m = float(np.median(com_smooth[com_smooth <= p15 + 0.3 * (p85 - p15)]))
+    day_depth_m = float(np.median(com_smooth[com_smooth >= p85 - 0.3 * (p85 - p15)]))
 
-    # Step 6: Map blended ratio to physical depth via percentile normalization
-    p_lo, p_hi = np.percentile(log_blend, config.dvm_norm_percentile)
-    phase = np.clip((log_blend - p_lo) / (p_hi - p_lo + 1e-10), 0, 1)
-    # phase: 1 = shallow-dominant (night), 0 = deep-dominant (day)
-    dvm_depth = config.dvm_depth_deep - phase * (
-        config.dvm_depth_deep - config.dvm_depth_shallow
-    )
+    # --- Step 7: Percentile normalization → physical depth ---
+    # Map the 15th–85th percentile range of the CoM to a physical depth range.
+    # The auto-detected night/day medians anchor the endpoints.
+    phase = np.clip((com_smooth - p15) / (p85 - p15 + 1e-10), 0, 1)
+    # phase: 0 = shallow (night), 1 = deep (day)
+    shallow_anchor = max(night_depth_m - 30, 100.0)  # margin below night depth
+    deep_anchor = min(day_depth_m + 30, 650.0)        # margin above day depth
+    dvm_depth = shallow_anchor + phase * (deep_anchor - shallow_anchor)
 
-    # Step 7: Smooth for musical continuity
-    dvm_depth = uniform_filter1d(dvm_depth, size=smooth_window, mode='nearest')
+    # --- Step 8: Auto-detect sunrise/sunset from velocity ---
+    sunrise_h, sunset_h = 5.75, 20.25  # defaults (South Atlantic Jan 2011)
+    dawn_end_h, dusk_start_h = 8.5, 19.5
+    if time_seconds is not None and len(time_seconds) == n_pings:
+        hours = time_seconds / 3600.0
+        # Velocity: negative gradient = descending (depth increasing)
+        dvm_vel = np.gradient(com_smooth, time_seconds) * 3600  # m/h (positive=deepening)
+        # Use heavy smoothing for sunrise/sunset detection (structural, not real-time)
+        detect_window = max(smooth_window * 3, 601)
+        dvm_vel_smooth = uniform_filter1d(dvm_vel, size=detect_window, mode='nearest')
 
-    return dvm_depth
+        # Dawn = strongest positive velocity (descent, depth increasing)
+        # Dusk = strongest negative velocity (ascent, depth decreasing)
+        # Search in reasonable hour windows to avoid false peaks
+        dawn_mask = (hours >= 3) & (hours <= 12)
+        dusk_mask = (hours >= 15) & (hours <= 23)
+
+        if np.any(dawn_mask):
+            dawn_peak_idx = np.where(dawn_mask)[0][np.argmax(dvm_vel_smooth[dawn_mask])]
+            dawn_peak_h = float(hours[dawn_peak_idx])
+            # Sunrise ≈ 1h before peak descent velocity
+            sunrise_h = round(max(dawn_peak_h - 1.0, 3.0), 2)
+            # Dawn end ≈ when velocity drops below 30% of peak (after peak)
+            dawn_peak_val = dvm_vel_smooth[dawn_peak_idx]
+            post_dawn = np.where((hours > dawn_peak_h) & dawn_mask)[0]
+            if len(post_dawn) > 0:
+                below_thresh = post_dawn[dvm_vel_smooth[post_dawn] < dawn_peak_val * 0.3]
+                if len(below_thresh) > 0:
+                    dawn_end_h = round(float(hours[below_thresh[0]]), 2)
+                else:
+                    dawn_end_h = round(dawn_peak_h + 2.5, 2)
+            else:
+                dawn_end_h = round(dawn_peak_h + 2.5, 2)
+
+        if np.any(dusk_mask):
+            dusk_peak_idx = np.where(dusk_mask)[0][np.argmin(dvm_vel_smooth[dusk_mask])]
+            dusk_peak_h = float(hours[dusk_peak_idx])
+            # Dusk start ≈ 1h before peak ascent velocity
+            dusk_start_h = round(max(dusk_peak_h - 1.0, 15.0), 2)
+            # Sunset ≈ 0.75h after peak ascent velocity
+            sunset_h = round(min(dusk_peak_h + 0.75, 23.5), 2)
+
+        print(f"    Auto-detected: sunrise={sunrise_h:.2f}h, dawn_end={dawn_end_h:.2f}h, "
+              f"dusk_start={dusk_start_h:.2f}h, sunset={sunset_h:.2f}h")
+
+    print(f"    Corridor CoM ({corridor_lo:.0f}-{corridor_hi:.0f}m): "
+          f"night={night_depth_m:.0f}m, day={day_depth_m:.0f}m, "
+          f"swing={abs(day_depth_m - night_depth_m):.0f}m")
+    print(f"    Depth mapping: {shallow_anchor:.0f}m (shallow) to {deep_anchor:.0f}m (deep)")
+
+    dvm_meta = {
+        'corridor_m': (corridor_lo, corridor_hi),
+        'night_depth_m': night_depth_m,
+        'day_depth_m': day_depth_m,
+        'shallow_anchor_m': shallow_anchor,
+        'deep_anchor_m': deep_anchor,
+        'sunrise_h': sunrise_h,
+        'sunset_h': sunset_h,
+        'dawn_end_h': dawn_end_h,
+        'dusk_start_h': dusk_start_h,
+    }
+
+    return dvm_depth, dvm_meta
 
 
 def compute_regime_changepoints(features, config):
@@ -1243,7 +1310,7 @@ def load_and_extract(date_str, config=None):
     # v7: Fixed 8-band zones + dual normalization + multi-scale diff
     # ================================================================
     print("\n" + "-" * 50)
-    print("Computing v7 sonification features (fixed zones)...")
+    print("Computing v8 sonification features (corridor CoM)...")
     print("-" * 50)
 
     print("  Computing 8-band histogram directly from raw Sv...")
@@ -1251,25 +1318,30 @@ def load_and_extract(date_str, config=None):
         sv_data, depth_values, config
     )
 
-    print("  Computing DVM depth from time-averaged Sv profiles...")
-    dvm_depth_smooth = compute_dvm_depth(sv_data, depth_values, config, sonification_mode=True)
+    print("  Computing DVM depth (corridor center-of-mass)...")
+    son_times = np.array([f['timestamp_seconds'] for f in son_features])
+    dvm_depth_smooth, dvm_meta = compute_dvm_depth(
+        sv_data, depth_values, config, sonification_mode=True,
+        time_seconds=son_times
+    )
 
-    # Export v7 JSON
-    print("\nCreating SuperCollider v7 JSON...")
+    # Export v8 JSON (corridor CoM + auto-detect)
+    print("\nCreating SuperCollider v8 JSON...")
     sc_data_v7 = create_supercollider_format_v7(
         son_features, config,
         hist_local, hist_global, diff_short, diff_medium,
         regime_score, regime_id, event_types, event_depths,
         tracked_depths, tracked_ages,
-        dvm_depth_smooth=dvm_depth_smooth
+        dvm_depth_smooth=dvm_depth_smooth,
+        dvm_meta=dvm_meta
     )
-    sc_path_v7 = OUTPUT_DATA / f"sonification_sc_v7_{date_str}.json"
-    with open(sc_path_v7, 'w') as f:
+    sc_path_v8 = OUTPUT_DATA / f"sonification_sc_v8_{date_str}.json"
+    with open(sc_path_v8, 'w') as f:
         json.dump(sc_data_v7, f, indent=2)
-    print(f"Saved: {sc_path_v7}")
+    print(f"Saved: {sc_path_v8}")
 
-    # v7 verification stats
-    print("\n  v7 Feature Statistics:")
+    # v8 verification stats
+    print("\n  v8 Feature Statistics:")
     print(f"    Zone 7 = DVM corridor ({config.dvm_corridor[0]}-{config.dvm_corridor[1]}m)")
     for b in range(8):
         local_std = hist_local[:, b].std()
@@ -1279,17 +1351,27 @@ def load_and_extract(date_str, config=None):
         print(f"    Band {b}: local_std={local_std:.3f}  global_std={global_std:.3f}  "
               f"diff_short_std={diff_s_std:.3f}  diff_medium_std={diff_m_std:.3f}")
 
-    # DVM peak depth statistics
+    # DVM depth statistics (using auto-detected sunrise/sunset from dvm_meta)
     dvm_depths = dvm_depth_smooth
     com_depths = np.array([f['depth_smooth_m'] for f in son_features])
     hours = np.array([f['hour_of_day'] for f in son_features])
-    night = (hours < 5.75) | (hours > 20.25)
-    day = (hours > 8.5) & (hours < 19.5)
-    print("\n  DVM Peak Depth vs Center-of-Mass:")
-    print(f"    DVM peak — night: {np.nanmean(dvm_depths[night]):.0f}m, "
+    if dvm_meta is not None:
+        sunrise_h = dvm_meta.get('sunrise_h', 5.75)
+        sunset_h = dvm_meta.get('sunset_h', 20.25)
+    else:
+        sunrise_h, sunset_h = 5.75, 20.25
+    night = (hours < sunrise_h - 1) | (hours > sunset_h + 1)
+    day = (hours > sunrise_h + 3) & (hours < sunset_h - 1)
+    print(f"\n  DVM Depth Statistics (sunrise={sunrise_h:.1f}h, sunset={sunset_h:.1f}h):")
+    if dvm_meta is not None:
+        print(f"    Auto-detected: night={dvm_meta.get('night_depth_m', '?'):.0f}m, "
+              f"day={dvm_meta.get('day_depth_m', '?'):.0f}m")
+        print(f"    Anchors: shallow={dvm_meta.get('shallow_anchor_m', '?'):.0f}m, "
+              f"deep={dvm_meta.get('deep_anchor_m', '?'):.0f}m")
+    print(f"    DVM track — night: {np.nanmean(dvm_depths[night]):.0f}m, "
           f"day: {np.nanmean(dvm_depths[day]):.0f}m, "
           f"swing: {np.nanmean(dvm_depths[day]) - np.nanmean(dvm_depths[night]):.0f}m")
-    print(f"    CoM      — night: {np.nanmean(com_depths[night]):.0f}m, "
+    print(f"    CoM       — night: {np.nanmean(com_depths[night]):.0f}m, "
           f"day: {np.nanmean(com_depths[day]):.0f}m, "
           f"swing: {np.nanmean(com_depths[day]) - np.nanmean(com_depths[night]):.0f}m")
     print(f"    DVM range: {np.nanmin(dvm_depths):.0f} – {np.nanmax(dvm_depths):.0f}m")
@@ -1800,7 +1882,8 @@ def create_supercollider_format_v7(features, config,
                                     regime_score, regime_id,
                                     event_types, event_depths,
                                     tracked_depths, tracked_ages,
-                                    dvm_depth_smooth=None):
+                                    dvm_depth_smooth=None,
+                                    dvm_meta=None):
     """Create SuperCollider v7 format: fixed 8-band zones + dual normalization + multi-scale diff.
 
     v7 changes from v6:
@@ -1809,7 +1892,8 @@ def create_supercollider_format_v7(features, config,
     - Both local (per-band) and global normalization
     - Differentials computed from same zone definitions at two timescales
     - Unsmoothed onset_peak for trigger detection
-    - DVM depth: time-averaged prominent peak tracking (tracks visible DVM arc)
+    - DVM depth: corridor CoM (50-600m) with auto-detected depth ranges
+    - Auto-detected sunrise/sunset from velocity peaks (stored in metadata)
     """
     def normalize(arr, min_val, max_val):
         return np.clip((arr - min_val) / (max_val - min_val + 1e-10), 0, 1)
@@ -1892,8 +1976,14 @@ def create_supercollider_format_v7(features, config,
     peak_prom_norm = normalize(peak_prom_arr, pprom_min, pprom_max)
     peak_width_norm = normalize(peak_width_arr, pwidth_min, pwidth_max)
 
-    # DVM peak depth: inverted (shallow=1, deep=0), same anchor range as depth_norm
-    dvm_depth_norm = 1.0 - normalize(dvm_depth_smooth, 100, 800)
+    # DVM depth: inverted (shallow=1, deep=0).
+    # Use auto-detected anchors if available, otherwise fixed range.
+    if dvm_meta is not None:
+        dvm_norm_lo = dvm_meta['shallow_anchor_m']
+        dvm_norm_hi = dvm_meta['deep_anchor_m']
+    else:
+        dvm_norm_lo, dvm_norm_hi = 100, 800
+    dvm_depth_norm = 1.0 - normalize(dvm_depth_smooth, dvm_norm_lo, dvm_norm_hi)
     # DVM velocity: 0=descending fast, 0.5=stationary, 1=ascending fast
     dvm_velocity_norm = normalize(dvm_velocity, dvm_vel_min, dvm_vel_max)
 
@@ -2023,10 +2113,26 @@ def create_supercollider_format_v7(features, config,
         'tracked_layer_3_age_norm': tracked_age_norm[:, 3].tolist(),
     }
 
+    # Build auto-detected metadata for SC sketch
+    dvm_info = {}
+    if dvm_meta is not None:
+        dvm_info = {
+            'dvm_algorithm': 'corridor_com',
+            'dvm_corridor_bounds_m': list(dvm_meta['corridor_m']),
+            'dvm_night_depth_m': dvm_meta['night_depth_m'],
+            'dvm_day_depth_m': dvm_meta['day_depth_m'],
+            'dvm_shallow_anchor_m': dvm_meta['shallow_anchor_m'],
+            'dvm_deep_anchor_m': dvm_meta['deep_anchor_m'],
+            'sunrise_h': dvm_meta['sunrise_h'],
+            'sunset_h': dvm_meta['sunset_h'],
+            'dawn_end_h': dvm_meta['dawn_end_h'],
+            'dusk_start_h': dvm_meta['dusk_start_h'],
+        }
+
     sc_data = {
         'info': {
-            'version': 'v7',
-            'description': '38 kHz sonification features (v7: direct zone computation, dual normalization, multi-scale differential)',
+            'version': 'v8',
+            'description': '38 kHz sonification features (v8: corridor CoM DVM, auto-detected depth/timing)',
             'mode': 'sonification',
             'smoothing_windows': {
                 'depth': config.son_depth_smooth_window,
@@ -2039,6 +2145,7 @@ def create_supercollider_format_v7(features, config,
             },
             'zone_edges_m': list(config.zone_edges),
             'dvm_corridor_m': list(config.dvm_corridor),
+            **dvm_info,
             'sample_rate_hz': float(1.0 / np.median(np.diff(times))) if len(times) > 1 else 0.3,
             'duration_seconds': float(times[-1]) if len(times) > 0 else 0,
             'num_points': n_pings,
@@ -2046,7 +2153,7 @@ def create_supercollider_format_v7(features, config,
             'max_tracked_layer_age': float(max_age),
             'normalization': {
                 'depth':              '0=deep (800m), 1=shallow (100m) — center-of-mass of all backscatter',
-                'dvm_depth':          '0=deep (800m), 1=shallow (100m) — dominant scattering layer (tracks visible DVM)',
+                'dvm_depth':          f'0=deep ({dvm_norm_hi:.0f}m), 1=shallow ({dvm_norm_lo:.0f}m) — corridor CoM (50-600m, excludes DSL)',
                 'dvm_velocity':       '0=descending fast, 0.5=stationary, 1=ascending fast (DVM layer)',
                 'intensity':          '0=quiet (p2), 1=loud (p98)',
                 'velocity':           '0=descending fast, 0.5=stationary, 1=ascending fast',
