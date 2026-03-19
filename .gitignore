@@ -30,7 +30,7 @@ venv/
 .venv/
 
 # Raw data (too large for git, download from PANGAEA)
-data/raw/
+data/
 MALASPINA_*/
 *.raw
 *.bot
