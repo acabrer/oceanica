@@ -78,7 +78,7 @@ class SonificationConfigV3:
     histogram_bands: int = 32           # v5: number of depth histogram bands
     # Smoothing windows (in number of pings, ~3s each)
     velocity_smooth_window: int = 600       # ~30 minutes
-    velocity_fine_smooth_window: int = 100  # ~5 minutes (captures rapid DVM events)
+    velocity_stable_smooth_window: int = 100  # ~5 minutes (captures rapid DVM events)
     acceleration_smooth_window: int = 300   # ~15 minutes
     # --- v6: Sonification mode (shorter smoothing, event features) ---
     sonification_mode: bool = False
@@ -422,10 +422,10 @@ def add_derived_features(features, config, sonification_mode=False):
     # Smooth velocity
     velocity_smooth = uniform_filter1d(velocity, vel_window, mode='nearest')
 
-    # Fine-scale velocity (5-min window for capturing rapid DVM events)
-    depth_smooth_fine = uniform_filter1d(depths_clean, config.velocity_fine_smooth_window, mode='nearest')
-    velocity_fine = -np.gradient(depth_smooth_fine, times) * 3600
-    velocity_fine_smooth = uniform_filter1d(velocity_fine, config.velocity_fine_smooth_window // 2, mode='nearest')
+    # Stable-window velocity (5-min window for capturing rapid DVM events)
+    depth_smooth_stable = uniform_filter1d(depths_clean, config.velocity_stable_smooth_window, mode='nearest')
+    velocity_stable = -np.gradient(depth_smooth_stable, times) * 3600
+    velocity_stable_smooth = uniform_filter1d(velocity_stable, config.velocity_stable_smooth_window // 2, mode='nearest')
 
     # Calculate acceleration (m/h²)
     acceleration = np.gradient(velocity_smooth, times) * 3600
@@ -497,7 +497,7 @@ def add_derived_features(features, config, sonification_mode=False):
     # Add to features
     for i, f in enumerate(features):
         f['velocity_m_h'] = float(velocity_smooth[i])
-        f['velocity_fine_m_h'] = float(velocity_fine_smooth[i])
+        f['velocity_stable_m_h'] = float(velocity_stable_smooth[i])
         f['acceleration_m_h2'] = float(acceleration_smooth[i])
         f['depth_anomaly_m'] = float(depth_anomaly[i])
         f['spread_change_m_min'] = float(spread_change[i])
@@ -1424,7 +1424,7 @@ def create_supercollider_format_v5(features, config):
     peak_width_arr = np.array([f['peak_mean_width_m'] for f in features])
 
     # Extract arrays (Tier 2 additions)
-    velocity_fine = np.array([f['velocity_fine_m_h'] for f in features])
+    velocity_stable = np.array([f['velocity_stable_m_h'] for f in features])
     outlier_arr = np.array([f['outlier_score'] for f in features])
     autocorr_3min_arr = np.array([f['autocorr_3min'] for f in features])
     autocorr_10min_arr = np.array([f['autocorr_10min'] for f in features])
@@ -1501,8 +1501,8 @@ def create_supercollider_format_v5(features, config):
     # ------------------------------------------------------------------
     # Tier 2: Normalize new features
     # ------------------------------------------------------------------
-    vel_fine_min, vel_fine_max = _percentile_range(velocity_fine)
-    velocity_fine_norm = normalize(velocity_fine, vel_fine_min, vel_fine_max)
+    vel_stable_min, vel_stable_max = _percentile_range(velocity_stable)
+    velocity_stable_norm = normalize(velocity_stable, vel_stable_min, vel_stable_max)
 
     # Outlier: fixed range (z-score 0-4), not percentile-based
     outlier_norm = normalize(outlier_arr, 0.0, 4.0)
@@ -1545,7 +1545,7 @@ def create_supercollider_format_v5(features, config):
                 'peak_prom':   '0=no prominent peaks, 1=strong layer distinctness (data p98)',
                 'peak_width':  '0=thin layers, 1=thick layers (data p98)',
                 'histogram':       '32-band depth energy profile, each band normalized [0,1] independently',
-                'velocity_fine':   '0=descending fast (fine), 0.5=stationary, 1=ascending fast (5-min window)',
+                'velocity_stable':   '0=descending fast (fine), 0.5=stationary, 1=ascending fast (5-min window)',
                 'outlier':         '0=normal, 1=extreme anomaly (z-score >= 4)',
                 'autocorr_3min':   '0=turbulent (3-min lag), 1=periodic/stable',
                 'autocorr_10min':  '0=turbulent (10-min lag), 1=periodic/stable',
@@ -1569,7 +1569,7 @@ def create_supercollider_format_v5(features, config):
                 'peak_width_m':           [float(pwidth_min), float(pwidth_max)],
                 'histogram_bands':        hist_band_ranges,
                 # Tier 2 ranges
-                'velocity_fine_m_h': [float(vel_fine_min), float(vel_fine_max)],
+                'velocity_stable_m_h': [float(vel_stable_min), float(vel_stable_max)],
                 'outlier_score':     [0.0, 4.0],
             }
         },
@@ -1624,9 +1624,9 @@ def create_supercollider_format_v5(features, config):
             # v5: Raw peak height for display
             'peak_max_height_db': peak_height_arr.tolist(),
 
-            # Tier 2: Fine-scale velocity (5-min window)
-            'velocity_fine_norm': velocity_fine_norm.tolist(),
-            'velocity_fine_m_h': velocity_fine.tolist(),
+            # Tier 2: Stable-window velocity (5-min window)
+            'velocity_stable_norm': velocity_stable_norm.tolist(),
+            'velocity_stable_m_h': velocity_stable.tolist(),
 
             # Tier 2: Outlier score (z-score based)
             'outlier_norm': outlier_norm.tolist(),
@@ -1661,7 +1661,7 @@ def create_supercollider_format_v6(features, config, hist_8band, hist_diff,
     spread = np.array([f['vertical_spread_m'] for f in features])
     layers = np.array([f['layer_count'] for f in features], dtype=float)
     velocity = np.array([f['velocity_m_h'] for f in features])
-    velocity_fine = np.array([f['velocity_fine_m_h'] for f in features])
+    velocity_stable = np.array([f['velocity_stable_m_h'] for f in features])
     acceleration = np.array([f['acceleration_m_h2'] for f in features])
     anomaly = np.array([f['depth_anomaly_m'] for f in features])
     spread_change = np.array([f['spread_change_m_min'] for f in features])
@@ -1683,7 +1683,7 @@ def create_supercollider_format_v6(features, config, hist_8band, hist_diff,
     intensity_min, intensity_max = _percentile_range(intensity)
     spread_min, spread_max = _percentile_range(spread)
     velocity_min, velocity_max = _percentile_range(velocity)
-    vel_fine_min, vel_fine_max = _percentile_range(velocity_fine)
+    vel_stable_min, vel_stable_max = _percentile_range(velocity_stable)
     accel_min, accel_max = _percentile_range(acceleration)
     spread_chg_min, spread_chg_max = _percentile_range(spread_change)
     anom_abs = float(np.nanpercentile(np.abs(anomaly), 98)) if np.any(~np.isnan(anomaly)) else 200.0
@@ -1701,7 +1701,7 @@ def create_supercollider_format_v6(features, config, hist_8band, hist_diff,
     spread_norm = normalize(spread, spread_min, spread_max)
     layers_norm = normalize(layers, 0, 8)
     velocity_norm = normalize(velocity, velocity_min, velocity_max)
-    velocity_fine_norm = normalize(velocity_fine, vel_fine_min, vel_fine_max)
+    velocity_stable_norm = normalize(velocity_stable, vel_stable_min, vel_stable_max)
     acceleration_norm = normalize(acceleration, accel_min, accel_max)
     anomaly_norm = 1.0 - normalize(anomaly, anomaly_min, anomaly_max)
     spread_change_norm = normalize(spread_change, spread_chg_min, spread_chg_max)
@@ -1755,7 +1755,7 @@ def create_supercollider_format_v6(features, config, hist_8band, hist_diff,
 
         # Dynamics (shorter smoothing)
         'velocity_norm': velocity_norm.tolist(),
-        'velocity_fine_norm': velocity_fine_norm.tolist(),
+        'velocity_stable_norm': velocity_stable_norm.tolist(),
         'acceleration_norm': acceleration_norm.tolist(),
         'anomaly_norm': anomaly_norm.tolist(),
         'spread_change_norm': spread_change_norm.tolist(),
@@ -1857,7 +1857,7 @@ def create_supercollider_format_v6(features, config, hist_8band, hist_diff,
                 'intensity_db': [intensity_min, intensity_max],
                 'spread_m': [spread_min, spread_max],
                 'velocity_m_h': [velocity_min, velocity_max],
-                'velocity_fine_m_h': [float(vel_fine_min), float(vel_fine_max)],
+                'velocity_stable_m_h': [float(vel_stable_min), float(vel_stable_max)],
                 'accel_m_h2': [accel_min, accel_max],
                 'anomaly_m': [anomaly_min, anomaly_max],
                 'layer_sep_m': [0.0, float(sep_max)],
@@ -1918,7 +1918,7 @@ def create_supercollider_format_v7(features, config,
     spread = np.array([f['vertical_spread_m'] for f in features])
     layers = np.array([f['layer_count'] for f in features], dtype=float)
     velocity = np.array([f['velocity_m_h'] for f in features])
-    velocity_fine = np.array([f['velocity_fine_m_h'] for f in features])
+    velocity_stable = np.array([f['velocity_stable_m_h'] for f in features])
     acceleration = np.array([f['acceleration_m_h2'] for f in features])
     anomaly = np.array([f['depth_anomaly_m'] for f in features])
     spread_change = np.array([f['spread_change_m_min'] for f in features])
@@ -1942,7 +1942,7 @@ def create_supercollider_format_v7(features, config,
     intensity_min, intensity_max = _percentile_range(intensity)
     spread_min, spread_max = _percentile_range(spread)
     velocity_min, velocity_max = _percentile_range(velocity)
-    vel_fine_min, vel_fine_max = _percentile_range(velocity_fine)
+    vel_stable_min, vel_stable_max = _percentile_range(velocity_stable)
     accel_min, accel_max = _percentile_range(acceleration)
     spread_chg_min, spread_chg_max = _percentile_range(spread_change)
     anom_abs = float(np.nanpercentile(np.abs(anomaly), 98)) if np.any(~np.isnan(anomaly)) else 200.0
@@ -1962,7 +1962,7 @@ def create_supercollider_format_v7(features, config,
     spread_norm = normalize(spread, spread_min, spread_max)
     layers_norm = normalize(layers, 0, 8)
     velocity_norm = normalize(velocity, velocity_min, velocity_max)
-    velocity_fine_norm = normalize(velocity_fine, vel_fine_min, vel_fine_max)
+    velocity_stable_norm = normalize(velocity_stable, vel_stable_min, vel_stable_max)
     acceleration_norm = normalize(acceleration, accel_min, accel_max)
     anomaly_norm = 1.0 - normalize(anomaly, anomaly_min, anomaly_max)
     spread_change_norm = normalize(spread_change, spread_chg_min, spread_chg_max)
@@ -2023,7 +2023,7 @@ def create_supercollider_format_v7(features, config,
 
         # Dynamics (shorter smoothing)
         'velocity_norm': velocity_norm.tolist(),
-        'velocity_fine_norm': velocity_fine_norm.tolist(),
+        'velocity_stable_norm': velocity_stable_norm.tolist(),
         'acceleration_norm': acceleration_norm.tolist(),
         'anomaly_norm': anomaly_norm.tolist(),
         'spread_change_norm': spread_change_norm.tolist(),
@@ -2177,7 +2177,7 @@ def create_supercollider_format_v7(features, config,
                 'intensity_db': [intensity_min, intensity_max],
                 'spread_m': [spread_min, spread_max],
                 'velocity_m_h': [velocity_min, velocity_max],
-                'velocity_fine_m_h': [float(vel_fine_min), float(vel_fine_max)],
+                'velocity_stable_m_h': [float(vel_stable_min), float(vel_stable_max)],
                 'dvm_velocity_m_h': [float(dvm_vel_min), float(dvm_vel_max)],
                 'accel_m_h2': [accel_min, accel_max],
                 'anomaly_m': [anomaly_min, anomaly_max],

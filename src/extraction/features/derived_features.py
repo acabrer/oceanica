@@ -98,10 +98,10 @@ def add_derived_features(features, config, sonification_mode=False):
     # Smooth velocity
     velocity_smooth = uniform_filter1d(velocity, vel_window, mode='nearest')
 
-    # Fine-scale velocity (5-min window for capturing rapid DVM events)
-    depth_smooth_fine = uniform_filter1d(depths_clean, config.velocity_fine_smooth_window, mode='nearest')
-    velocity_fine = -np.gradient(depth_smooth_fine, times) * 3600
-    velocity_fine_smooth = uniform_filter1d(velocity_fine, config.velocity_fine_smooth_window // 2, mode='nearest')
+    # Stable-window velocity (5-min window for capturing rapid DVM events)
+    depth_smooth_stable = uniform_filter1d(depths_clean, config.velocity_stable_smooth_window, mode='nearest')
+    velocity_stable = -np.gradient(depth_smooth_stable, times) * 3600
+    velocity_stable_smooth = uniform_filter1d(velocity_stable, config.velocity_stable_smooth_window // 2, mode='nearest')
 
     # Calculate acceleration (m/h^2)
     acceleration = np.gradient(velocity_smooth, times) * 3600
@@ -161,7 +161,7 @@ def add_derived_features(features, config, sonification_mode=False):
     # Add to features
     for i, f in enumerate(features):
         f['velocity_m_h'] = float(velocity_smooth[i])
-        f['velocity_fine_m_h'] = float(velocity_fine_smooth[i])
+        f['velocity_stable_m_h'] = float(velocity_stable_smooth[i])
         f['acceleration_m_h2'] = float(acceleration_smooth[i])
         f['depth_anomaly_m'] = float(depth_anomaly[i])
         f['spread_change_m_min'] = float(spread_change[i])

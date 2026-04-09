@@ -18,7 +18,7 @@ VOICE ARCHITECTURE:
   deepDrone       (25-120 Hz)   — mesopelagic refuge (400-800m); acceleration vibrato + autocorr-modulated drift
   migrationVoice  (80-800 Hz)   — DVM movement; persistent, continuous amp from velocity deviation
   histogramFilter (50-5000 Hz)  — 32-band resonant filter, kurtosis-driven Q, midwater excitation rate
-  spectralGrain   (IFFT buffer) — granular texture, fine velocity + autocorrelation density, outlier amp boost
+  spectralGrain   (IFFT buffer) — granular texture, stable velocity + autocorrelation density, outlier amp boost
   onsetPercussion (70-600 Hz)   — transients with depth-zone timbral variety, outlier-lowered threshold
   infraDrone      (5-15 Hz)     — sub-audible acceleration layer (felt, not heard); bypasses voice controls
 
@@ -28,7 +28,7 @@ SIGNAL ROUTING:
   muteAll gate on both FX + direct outputs (kills reverb/delay tails when all voices muted)
 
 DATA: Reads sonification_sc_v5_{date}.json (v4 fields + depth_histogram, skewness, kurtosis,
-      vertical_gradient, peak properties, velocity_fine, outlier, autocorr_3min, autocorr_10min)
+      vertical_gradient, peak properties, velocity_stable, outlier, autocorr_3min, autocorr_10min)
 
 SECTION TIMING (calibrated DVM, South Atlantic 25°S Jan 2011):
   night1  00:00 – 05:45 UTC   surface feeding
@@ -107,7 +107,7 @@ jsonFile.close;
 ~peakWidth     = ~jsonData["38kHz"]["peak_width_norm"].asArray.collect(_.asFloat);
 
 // --- Tier 2 new arrays ---
-~velocityFine = ~jsonData["38kHz"]["velocity_fine_norm"].asArray.collect(_.asFloat);
+~velocityStable = ~jsonData["38kHz"]["velocity_stable_norm"].asArray.collect(_.asFloat);
 ~outlier      = ~jsonData["38kHz"]["outlier_norm"].asArray.collect(_.asFloat);
 ~autocorr3    = ~jsonData["38kHz"]["autocorr_3min_norm"].asArray.collect(_.asFloat);
 ~autocorr10   = ~jsonData["38kHz"]["autocorr_10min_norm"].asArray.collect(_.asFloat);
@@ -1014,7 +1014,7 @@ SynthDef(\infraDrone, { |out=0, freq=8, amp=0.04, gate=1, lagTime=2.0|
     var depthRawVal, velRawVal;
     var histVals;
     // Tier 2 data values
-    var velocityFineVal, outlierVal, autocorr3Val, autocorr10Val;
+    var velocityStableVal, outlierVal, autocorr3Val, autocorr10Val;
 
     // Section tracking
     var section = \night1, lastSection = \none;
@@ -1088,7 +1088,7 @@ SynthDef(\infraDrone, { |out=0, freq=8, amp=0.04, gate=1, lagTime=2.0|
         peakWidthVal    = ~getValue.(~peakWidth,    ~times, currentTime, ~compression, 1.5 * ~speed);
 
         // Tier 2 features
-        velocityFineVal = ~getValue.(~velocityFine, ~times, currentTime, ~compression, 0.5 * ~speed);
+        velocityStableVal = ~getValue.(~velocityStable, ~times, currentTime, ~compression, 0.5 * ~speed);
         outlierVal      = ~getValue.(~outlier,      ~times, currentTime, ~compression, 1.0 * ~speed);
         autocorr3Val    = ~getValue.(~autocorr3,    ~times, currentTime, ~compression, 1.5 * ~speed);
         autocorr10Val   = ~getValue.(~autocorr10,   ~times, currentTime, ~compression, 1.5 * ~speed);
@@ -1154,7 +1154,7 @@ SynthDef(\infraDrone, { |out=0, freq=8, amp=0.04, gate=1, lagTime=2.0|
             \exciteRate, midwaterVal.linlin(0.0, 1.0, 8, 35)
         );
 
-        // Spectral grain (fine velocity + autocorrelation modulate density; outlier boosts amp)
+        // Spectral grain (stable velocity + autocorrelation modulate density; outlier boosts amp)
         synths[\grain].set(
             \pos,       (currentTime / ~totalDuration).clip(0.001, 0.999),
             \amp,       ~getVoiceAmp.(\grain,
@@ -1163,7 +1163,7 @@ SynthDef(\infraDrone, { |out=0, freq=8, amp=0.04, gate=1, lagTime=2.0|
             \ipc,       ipcVal,
             \entropy,   entropyVal,
             \intensity, intensityVal,
-            \density,   (6 + (entropyVal * 30) + ((velocityFineVal - 0.5).abs * 20))
+            \density,   (6 + (entropyVal * 30) + ((velocityStableVal - 0.5).abs * 20))
                 * autocorr3Val.linlin(0, 1, 1.3, 0.8)
         );
 
@@ -1376,12 +1376,12 @@ KEY DIFFERENCES FROM v6:
   - Deep drone: wider freq range (25-120Hz), acceleration vibrato, autocorrelation-modulated filter drift
   - Migration: persistent with continuous amp from velocity deviation (no binary pop)
   - Histogram filter: kurtosis-driven Q bandwidth, midwater-driven excitation rate (day texture)
-  - Granular: fine velocity + autocorrelation density modulation, outlier amp boost
+  - Granular: stable velocity + autocorrelation density modulation, outlier amp boost
   - Onset: depth-zone timbral variety, outlier-lowered threshold, compression-scaled cooldown
   - FX: muteAll gate on both FX + direct chains (kills reverb/delay tails on full mute)
   - Infrasound layer (5-15 Hz): acceleration-driven, felt not heard
   - Presets removed (simplification)
-  - Uses v5 JSON with Tier 2 features: velocity_fine, outlier, autocorrelation
+  - Uses v5 JSON with Tier 2 features: velocity_stable, outlier, autocorrelation
 
 VOICE → DATA MAPPING:
   surfaceTexture  ← surface_norm (freq 400-2200Hz + amp), entropy (tonal↔noise),
@@ -1400,7 +1400,7 @@ VOICE → DATA MAPPING:
                      intensity_norm (amp 0.15-0.45), midwater (excitation rate 8-35)
                      Represents: vertical ocean structure (energy at each depth stratum)
   spectralGrain   ← composition time (pos), ipc^0.3 (grain duration),
-                     density = entropy + velocity_fine + autocorr_3min modulation,
+                     density = entropy + velocity_stable + autocorr_3min modulation,
                      amp boosted by outlier_score
                      Represents: overall echogram texture (from IFFT audio buffer)
   onsetPercussion ← onset_strength (trigger, threshold lowered by outlier_score),
@@ -1421,6 +1421,6 @@ ONSET THRESHOLD:
   Effective threshold = knob value * (1 - outlier * 0.6) — anomalous moments get more hits.
   Cooldown = (0.15 / speed) / sqrt(compression) — ~30-80 events over 8 min.
 
-DATA: sonification_sc_v5_20110126.json (v4 + histogram + shape + velocity_fine + outlier + autocorrelation)
+DATA: sonification_sc_v5_20110126.json (v4 + histogram + shape + velocity_stable + outlier + autocorrelation)
 BUFFER: echogram_audio_20110126_ifft.wav
 */

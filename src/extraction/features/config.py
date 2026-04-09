@@ -21,7 +21,7 @@ class SonificationConfigV3:
     histogram_bands: int = 32           # v5: number of depth histogram bands
     # Smoothing windows (in number of pings, ~3s each)
     velocity_smooth_window: int = 600       # ~30 minutes
-    velocity_fine_smooth_window: int = 100  # ~5 minutes (captures rapid DVM events)
+    velocity_stable_smooth_window: int = 100  # ~5 minutes (captures rapid DVM events)
     acceleration_smooth_window: int = 300   # ~15 minutes
     # --- v6: Sonification mode (shorter smoothing, event features) ---
     sonification_mode: bool = False

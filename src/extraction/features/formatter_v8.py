@@ -45,7 +45,7 @@ def create_sc_format_v8(features, config,
     spread = np.array([f['vertical_spread_m'] for f in features])
     layers = np.array([f['layer_count'] for f in features], dtype=float)
     velocity = np.array([f['velocity_m_h'] for f in features])
-    velocity_fine = np.array([f['velocity_fine_m_h'] for f in features])
+    velocity_stable = np.array([f['velocity_stable_m_h'] for f in features])
     acceleration = np.array([f['acceleration_m_h2'] for f in features])
     anomaly = np.array([f['depth_anomaly_m'] for f in features])
     spread_change = np.array([f['spread_change_m_min'] for f in features])
@@ -69,7 +69,7 @@ def create_sc_format_v8(features, config,
     intensity_min, intensity_max = percentile_range(intensity)
     spread_min, spread_max = percentile_range(spread)
     velocity_min, velocity_max = percentile_range(velocity)
-    vel_fine_min, vel_fine_max = percentile_range(velocity_fine)
+    vel_stable_min, vel_stable_max = percentile_range(velocity_stable)
     accel_min, accel_max = percentile_range(acceleration)
     spread_chg_min, spread_chg_max = percentile_range(spread_change)
     anom_abs = float(np.nanpercentile(np.abs(anomaly), 98)) if np.any(~np.isnan(anomaly)) else 200.0
@@ -89,7 +89,7 @@ def create_sc_format_v8(features, config,
     spread_norm = normalize(spread, spread_min, spread_max)
     layers_norm = normalize(layers, 0, 8)
     velocity_norm = normalize(velocity, velocity_min, velocity_max)
-    velocity_fine_norm = normalize(velocity_fine, vel_fine_min, vel_fine_max)
+    velocity_stable_norm = normalize(velocity_stable, vel_stable_min, vel_stable_max)
     acceleration_norm = normalize(acceleration, accel_min, accel_max)
     anomaly_norm = 1.0 - normalize(anomaly, anomaly_min, anomaly_max)
     spread_change_norm = normalize(spread_change, spread_chg_min, spread_chg_max)
@@ -149,7 +149,7 @@ def create_sc_format_v8(features, config,
 
         # Dynamics (shorter smoothing)
         'velocity_norm': velocity_norm.tolist(),
-        'velocity_fine_norm': velocity_fine_norm.tolist(),
+        'velocity_stable_norm': velocity_stable_norm.tolist(),
         'acceleration_norm': acceleration_norm.tolist(),
         'anomaly_norm': anomaly_norm.tolist(),
         'spread_change_norm': spread_change_norm.tolist(),
@@ -303,7 +303,7 @@ def create_sc_format_v8(features, config,
                 'intensity_db': [intensity_min, intensity_max],
                 'spread_m': [spread_min, spread_max],
                 'velocity_m_h': [velocity_min, velocity_max],
-                'velocity_fine_m_h': [float(vel_fine_min), float(vel_fine_max)],
+                'velocity_stable_m_h': [float(vel_stable_min), float(vel_stable_max)],
                 'dvm_velocity_m_h': [float(dvm_vel_min), float(dvm_vel_max)],
                 'accel_m_h2': [accel_min, accel_max],
                 'anomaly_m': [anomaly_min, anomaly_max],
