@@ -39,12 +39,6 @@ Extreure a `data/raw/MALASPINA_LEG2_1/`. Les dades preprocessades s'inclouen a `
 
 ## Inici ràpid
 
-### Opció A: Reproduir la composició (no calen dades en brut)
-1. Obrir `supercollider/voices/01_migration_arc.scd` a SuperCollider
-2. Executar les seccions en ordre (Cmd+Enter)
-3. Prémer PLAY a la interfície
-
-### Opció B: Pipeline complet des de dades en brut
 ```bash
 source venv_echosound_py311/bin/activate
 
