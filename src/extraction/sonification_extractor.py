@@ -64,7 +64,7 @@ def load_and_extract(date_str, config=None):
     """
     Load cleaned 24h data from NetCDF and extract sonification features.
 
-    Produces a single v8 JSON file with all features needed by SC sketches.
+    Produces a single v8 JSON file with all features needed by SC voices.
 
     Parameters
     ----------

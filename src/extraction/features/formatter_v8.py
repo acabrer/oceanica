@@ -1,7 +1,7 @@
 """
 SuperCollider v8 JSON formatter.
 
-Builds the normalized JSON structure consumed by SC sketches.
+Builds the normalized JSON structure consumed by SC voices.
 v8: corridor CoM DVM, auto-detected depth/timing, fixed 8-band zones,
 dual normalization, multi-scale differentials.
 """

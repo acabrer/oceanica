@@ -60,7 +60,7 @@ s.options.numInputBusChannels  = 0;
 s.options.memSize     = 2.pow(19);
 s.options.sampleRate  = 48000;
 
-// Path: sketches/ -> supercollider/ -> project root -> output/data/
+// Path: voices/ -> supercollider/ -> project root -> output/data/
 ~dataPath = thisProcess.nowExecutingPath.dirname.dirname.dirname +/+ "output/data/";
 ~dateStr  = "20110126";
 
