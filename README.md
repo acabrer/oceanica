@@ -37,7 +37,7 @@ Extreure a `data/raw/MALASPINA_LEG2_1/`. Les dades preprocessades s'inclouen a `
 
 ---
 
-## Inici ràpid
+## Comandes inicialització
 
 ```bash
 source venv_echosound_py311/bin/activate
