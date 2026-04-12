@@ -305,14 +305,25 @@ def create_validation_visualization(date_str, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
     print(f"\nSaved: {output_path}")
 
-    # Also create single-panel 24h echogram
-    create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_dir, date_str)
+    # Also create single-panel 24h echograms (with and without DVM overlay)
+    create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_dir, date_str,
+                        show_dvm=True)
+    create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_dir, date_str,
+                        show_dvm=False)
 
     plt.close()
 
 
-def create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_dir, date_str):
-    """Create a single-panel 24h echogram from cleaned data."""
+def create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_dir, date_str,
+                        show_dvm=True):
+    """Create a single-panel 24h echogram from cleaned data.
+
+    Parameters
+    ----------
+    show_dvm : bool
+        If True (default), overlay the DVM center-of-mass line when available.
+        If False, produce a clean echogram without overlay.
+    """
     config = ECHOGRAM_PRESETS['publication']
     sv_min, sv_max = config['sv_range']
     depth_min, depth_max = config['depth_range']
@@ -328,8 +339,9 @@ def create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_d
 
     im = ax.pcolormesh(hours, depths, sv_plot, cmap=cmap, shading='auto', vmin=sv_min, vmax=sv_max)
 
-    # Overlay center of mass (if available)
-    if feat_hours is not None and feat_depth is not None:
+    # Overlay center of mass (if available and requested)
+    has_dvm = feat_hours is not None and feat_depth is not None
+    if show_dvm and has_dvm:
         ax.plot(feat_hours, feat_depth, 'r-', linewidth=2, alpha=0.9)
 
     ax.set_ylim(depth_max, depth_min)
@@ -339,7 +351,7 @@ def create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_d
 
     # Format date for title
     date_title = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-    dvm_label = " with DVM" if feat_hours is not None else ""
+    dvm_label = " with DVM" if (show_dvm and has_dvm) else ""
     ax.set_title(f'MALASPINA Atlantic - {date_title} - 38 kHz Echogram{dvm_label}',
                  fontsize=13)
 
@@ -352,7 +364,8 @@ def create_24h_echogram(sv_data, depths, hours, feat_hours, feat_depth, output_d
 
     plt.tight_layout()
 
-    output_path = output_dir / f"echogram_24h_{date_str}.png"
+    suffix = "" if show_dvm else "_nodvm"
+    output_path = output_dir / f"echogram_24h_{date_str}{suffix}.png"
     plt.savefig(output_path, dpi=config['dpi'], bbox_inches='tight', facecolor='white')
     print(f"Saved: {output_path}")
 

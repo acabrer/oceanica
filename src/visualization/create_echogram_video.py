@@ -78,10 +78,18 @@ def detect_plot_bounds(png_path):
     return left, right, top, bottom, w, h
 
 
-def create_video(date_str):
+def create_video(date_str, method='ifft', ifft_iter=32):
     """Create MP4 montage: echogram PNG + playhead + audio WAV."""
-    png_path = OUTPUT_VIZ / f"echogram_24h_{date_str}.png"
-    wav_path = OUTPUT_DATA / f"echogram_audio_{date_str}.wav"
+    # Build WAV suffix to match echogram_to_audio.py naming convention
+    if method == 'ifft' and ifft_iter > 0:
+        wav_suffix = f"_ifft_gl{ifft_iter}"
+    elif method == 'ifft':
+        wav_suffix = "_ifft"
+    else:
+        wav_suffix = ""
+
+    png_path = OUTPUT_VIZ / f"echogram_24h_{date_str}_nodvm.png"
+    wav_path = OUTPUT_DATA / f"echogram_audio_{date_str}{wav_suffix}.wav"
     mp4_path = OUTPUT_VIZ / f"echogram_sonogram_{date_str}.mp4"
 
     # Validate inputs
@@ -91,7 +99,8 @@ def create_video(date_str):
         return
     if not wav_path.exists():
         print(f"ERROR: Audio not found: {wav_path}")
-        print(f"  Run: python src/extraction/echogram_to_audio.py {date_str}")
+        print(f"  Run: python src/extraction/echogram_to_audio.py {date_str} --method {method}"
+              + (f" --ifft-iter {ifft_iter}" if method == 'ifft' and ifft_iter > 0 else ""))
         return
     if not shutil.which('ffmpeg'):
         print("ERROR: ffmpeg not found. Install with: brew install ffmpeg")
@@ -212,6 +221,15 @@ if __name__ == "__main__":
         'date', nargs='?', default='20110126',
         help='Date in YYYYMMDD format (default: 20110126)'
     )
+    parser.add_argument(
+        '--method', type=str, default='ifft',
+        choices=['additive', 'ifft'],
+        help='Audio synthesis method to use (default: ifft)'
+    )
+    parser.add_argument(
+        '--ifft-iter', type=int, default=32,
+        help='Griffin-Lim iterations (only for ifft method, default: 32)'
+    )
     args = parser.parse_args()
 
-    create_video(args.date)
+    create_video(args.date, method=args.method, ifft_iter=args.ifft_iter)
