@@ -253,5 +253,3 @@ El fitxer `sonification_sc_v8_{data}.json` conté arrays prenormalitzats (0.0-1.
 Aquest projecte forma part d'una subvenció cultural de la Generalitat de Catalunya, Departament de Cultura (CLT019).
 
 ---
-
-*Sonificació Oceànica — Fer audible la migració invisible.*
