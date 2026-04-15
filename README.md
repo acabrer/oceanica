@@ -250,6 +250,12 @@ El fitxer `sonification_sc_v8_{data}.json` conté arrays prenormalitzats (0.0-1.
 
 ## Llicència
 
-Aquest projecte forma part d'una subvenció cultural de la Generalitat de Catalunya, Departament de Cultura (CLT019).
+
+
+Aquesta obra ha rebut una beca de creació artística, recerca i innovació de la Generalitat de Catalunya, als elements informatius i de difusió i publicitat del projecte de recerca o creació objecte de la subvenció.
+
+<p align="center">
+  <img src="assets/idbh.png" alt="Generalitat de Catalunya" width="300"/>
+</p>
 
 ---
